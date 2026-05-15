@@ -56,9 +56,36 @@ EFFECT_SIZE_SHEET_COLUMNS = [
 
 
 def _credentials() -> Credentials:
-    # Preferred on Railway: base64-encoded JSON (immune to quoting issues
-    # in the dashboard). Generate with `base64 -w0 < key.json` on Linux or
-    # `base64 < key.json | tr -d '\n'` on macOS.
+    # Easiest on Railway: paste the three values from the JSON file into
+    # individual env vars. The private key supports either real newlines or
+    # literal \n escape sequences (which we convert back to newlines).
+    sa_email = os.environ.get("GOOGLE_CLIENT_EMAIL")
+    sa_key = os.environ.get("GOOGLE_PRIVATE_KEY")
+    if sa_email and sa_key:
+        info = {
+            "type": "service_account",
+            "project_id": os.environ.get("GOOGLE_PROJECT_ID", ""),
+            "private_key_id": os.environ.get("GOOGLE_PRIVATE_KEY_ID", ""),
+            "private_key": sa_key.replace("\\n", "\n").strip().strip('"').strip("'") + "\n",
+            "client_email": sa_email.strip(),
+            "client_id": os.environ.get("GOOGLE_CLIENT_ID", ""),
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+        }
+        # Make the private key newline-handling idempotent — strip wrapping
+        # quotes were already removed; ensure it actually contains BEGIN/END.
+        pk = info["private_key"]
+        if "BEGIN PRIVATE KEY" not in pk or "END PRIVATE KEY" not in pk:
+            raise RuntimeError(
+                "GOOGLE_PRIVATE_KEY is set but doesn't look like a PEM private key. "
+                "Paste the full value of the `private_key` field from the JSON, "
+                "including the -----BEGIN PRIVATE KEY----- and -----END PRIVATE KEY----- "
+                "lines. Literal '\\n' will be converted back to newlines automatically."
+            )
+        return Credentials.from_service_account_info(info, scopes=SCOPES)
+
+    # Preferred on Railway when you want the whole key: base64-encoded JSON.
     raw_b64 = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON_B64")
     if raw_b64:
         import binascii
@@ -117,7 +144,8 @@ def _credentials() -> Credentials:
 
     raise RuntimeError(
         "Google Sheets credentials are not configured. Set one of: "
-        "GOOGLE_SERVICE_ACCOUNT_JSON_B64 (base64, recommended on Railway), "
+        "GOOGLE_CLIENT_EMAIL + GOOGLE_PRIVATE_KEY (easiest on Railway), "
+        "GOOGLE_SERVICE_ACCOUNT_JSON_B64 (base64-encoded JSON), "
         "GOOGLE_SERVICE_ACCOUNT_JSON (raw JSON), "
         "or GOOGLE_SERVICE_ACCOUNT_FILE (path to a JSON key, local only)."
     )

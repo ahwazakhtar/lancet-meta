@@ -4,19 +4,20 @@
 <article style="max-width: 28rem; margin: 4rem auto;">
   <hgroup>
     <h2>Sign in</h2>
-    <p>Reviewer access required.</p>
+    <p>Enter your email to start reviewing.</p>
   </hgroup>
-  {% if error %}
-    <p style="color: var(--pico-color-red-500);">Invalid username or password.</p>
+  {% if error == "unknown" %}
+    <p class="msg-error">That email isn't on the reviewer list. Ask the admin to add you.</p>
   {% endif %}
   <form method="post" action="/login">
-    <label>Username
-      <input type="text" name="username" required autofocus>
-    </label>
-    <label>Password
-      <input type="password" name="password" required>
+    <label>Email
+      <input type="email" name="email" required autofocus autocomplete="email">
     </label>
     <button type="submit">Sign in</button>
   </form>
+  <p class="muted" style="margin-top:1.5rem;font-size:0.85em;">
+    Sign-in is by email only — there is no password. This is for tracking who
+    edits what, not for security.
+  </p>
 </article>
 {% endblock %}

@@ -50,7 +50,7 @@ extraction/        Local pipeline
 
 webapp/            Reviewer UI (deployable)
   main.py          FastAPI app
-  auth.py          Session cookie + bcrypt
+  auth.py          Email-only sign-in (no password)
   templates/       Jinja2 templates (Pico CSS + HTMX)
   static/app.css
 
@@ -154,22 +154,17 @@ like `your-app.up.railway.app`.
 
 ### 5. Create reviewer accounts
 
-Two options:
+Sign-in is **email-only** — no password. Anyone whose email is on the
+reviewer list can sign in; the email is recorded against every edit in the
+audit log. This is for attribution, not for security.
 
-**A. Locally, then publish:** create the users in your local SQLite and
-publish to the Sheet — but users don't live in the Sheet, so this won't
-work. Use option B.
+The simplest way to bootstrap the first admin on Railway is to set
+`ADMIN_BOOTSTRAP_EMAIL=your@email.com` in the service's env vars. On the
+first start, if no users exist yet, that email is auto-added as an admin.
+You can then sign in and add the rest of your team from `/admin`.
 
-**B. SSH into the Railway container** (Railway → service → "Run a command")
-and run:
-
-```bash
-python -m extraction create-user --username ahwaz --admin
-python -m extraction create-user --username reviewer1
-```
-
-These commands write to `/data/app.db` inside the container, where the web
-app picks them up.
+(You can also run `python -m extraction add-user --email x@y.com --admin`
+via `railway run` if you prefer a CLI.)
 
 ### 6. Usage on the deployed app
 
@@ -189,8 +184,9 @@ app picks them up.
 - Railway free tier is fine for ~351 papers / a few thousand effect sizes.
 - The CLI commands (`extract`, `publish`, etc.) are **not** intended to be
   run on Railway routinely — the local pipeline does the LLM work, the
-  cloud app does the review work. The only CLI usage on Railway is
-  `create-user`.
+  cloud app does the review work. The only CLI usage on Railway is the
+  optional `add-user`, and even that's usually unnecessary if you use
+  `ADMIN_BOOTSTRAP_EMAIL`.
 
 ## How the data flows back to the Sheet
 
@@ -203,6 +199,6 @@ Reviewer actions:
 - **Flag re-extraction** — sets status to `needs_reextraction` so the local
   pipeline can re-process that paper.
 
-Every action is appended to the `audit_log` table with the username and
-timestamp. The Sheet column layout is in `extraction/sheets.py`
+Every action is appended to the `audit_log` table with the reviewer's
+email and timestamp. The Sheet column layout is in `extraction/sheets.py`
 (`PAPER_SHEET_COLUMNS`, `EFFECT_SIZE_SHEET_COLUMNS`).

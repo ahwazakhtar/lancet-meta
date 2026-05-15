@@ -1,6 +1,9 @@
 """
 FastAPI web app for reviewing extracted effect sizes.
 
+Sign-in is email-only and exists purely to attribute audit-log entries.
+See `webapp/auth.py`.
+
 Run locally:
 
     uvicorn webapp.main:app --reload
@@ -26,12 +29,7 @@ from sqlmodel import Session, select
 from starlette.middleware.sessions import SessionMiddleware
 
 from extraction.schema import effect_size_field_names, paper_field_names
-from extraction.sheets import (
-    EFFECT_SIZE_SHEET_COLUMNS,
-    PAPER_SHEET_COLUMNS,
-    pull_from_sheets,
-    push_to_sheets,
-)
+from extraction.sheets import pull_from_sheets, push_to_sheets
 from extraction.storage import (
     AuditLog,
     EffectSizeRow,
@@ -42,7 +40,7 @@ from extraction.storage import (
     import_from_sheet_rows,
 )
 
-from .auth import authenticate, current_user_optional, current_username, require_admin
+from .auth import authenticate, current_email, current_email_optional, require_admin
 
 load_dotenv()
 
@@ -65,8 +63,8 @@ def get_session() -> Session:
         yield session
 
 
-def _log(session: Session, username: str, action: str, target: str, payload: dict | None = None) -> None:
-    session.add(AuditLog(username=username, action=action, target=target, payload=payload or {}))
+def _log(session: Session, email: str, action: str, target: str, payload: dict | None = None) -> None:
+    session.add(AuditLog(email=email, action=action, target=target, payload=payload or {}))
 
 
 def _editable_paper_fields() -> list[str]:
@@ -78,32 +76,30 @@ def _editable_effect_fields() -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Auth
+# Sign-in (email only)
 # ---------------------------------------------------------------------------
 
 
 @app.get("/login", response_class=HTMLResponse)
 def login_form(request: Request, error: Optional[str] = None) -> HTMLResponse:
-    if current_user_optional(request):
+    if current_email_optional(request):
         return RedirectResponse("/", status_code=status.HTTP_303_SEE_OTHER)
-    return templates.TemplateResponse(
-        request, "login.html", {"error": error}
-    )
+    return templates.TemplateResponse(request, "login.html", {"error": error})
 
 
 @app.post("/login")
 def login_submit(
     request: Request,
-    username: str = Form(...),
-    password: str = Form(...),
+    email: str = Form(...),
     session: Session = Depends(get_session),
 ):
-    user = authenticate(session, username, password)
+    user = authenticate(session, email)
     if not user:
         return RedirectResponse(
-            "/login?error=invalid", status_code=status.HTTP_303_SEE_OTHER
+            "/login?error=unknown", status_code=status.HTTP_303_SEE_OTHER
         )
-    request.session["username"] = user.username
+    request.session["email"] = user.email
+    request.session["display_name"] = user.display_name or user.email
     request.session["is_admin"] = user.is_admin
     return RedirectResponse("/", status_code=status.HTTP_303_SEE_OTHER)
 
@@ -126,7 +122,7 @@ def index(
     status_filter: Optional[str] = None,
     session: Session = Depends(get_session),
 ):
-    if not current_user_optional(request):
+    if not current_email_optional(request):
         return RedirectResponse("/login", status_code=status.HTTP_303_SEE_OTHER)
 
     stmt = select(PaperRow).where(PaperRow.status != ReviewStatus.deleted)
@@ -143,9 +139,9 @@ def index(
             if ql in (p.unique_id or "").lower()
             or ql in (p.authors or "").lower()
             or ql in (p.intervention_category or "").lower()
+            or ql in (p.title or "").lower()
         ]
 
-    # Effect size counts per paper
     es_counts: dict[str, int] = {}
     for row in session.exec(
         select(EffectSizeRow.paper_unique_id).where(EffectSizeRow.status != ReviewStatus.deleted)
@@ -161,13 +157,13 @@ def index(
             "q": q or "",
             "status_filter": status_filter or "",
             "statuses": [s.value for s in ReviewStatus],
-            "username": request.session.get("username"),
+            "display_name": request.session.get("display_name"),
         },
     )
 
 
 # ---------------------------------------------------------------------------
-# Paper detail (with effect sizes)
+# Paper detail
 # ---------------------------------------------------------------------------
 
 
@@ -177,7 +173,7 @@ def paper_detail(
     unique_id: str,
     session: Session = Depends(get_session),
 ):
-    current_username(request)
+    current_email(request)
     paper = session.exec(select(PaperRow).where(PaperRow.unique_id == unique_id)).first()
     if not paper:
         raise HTTPException(404)
@@ -198,7 +194,7 @@ def paper_detail(
             "paper_fields": _editable_paper_fields(),
             "effect_fields": _editable_effect_fields(),
             "statuses": [s.value for s in ReviewStatus],
-            "username": request.session.get("username"),
+            "display_name": request.session.get("display_name"),
         },
     )
 
@@ -214,7 +210,7 @@ async def paper_edit(
     unique_id: str,
     session: Session = Depends(get_session),
 ):
-    username = current_username(request)
+    email = current_email(request)
     form = await request.form()
     paper = session.exec(select(PaperRow).where(PaperRow.unique_id == unique_id)).first()
     if not paper:
@@ -243,9 +239,9 @@ async def paper_edit(
 
     if changes:
         paper.status = ReviewStatus.needs_reextraction if needs_reextraction else ReviewStatus.modified
-        paper.last_modified_by = username
+        paper.last_modified_by = email
         paper.updated_at = datetime.utcnow()
-        _log(session, username, "modify", f"paper:{paper.id}", {"changes": changes})
+        _log(session, email, "modify", f"paper:{paper.id}", {"changes": changes})
 
     session.add(paper)
     session.commit()
@@ -258,14 +254,14 @@ def paper_confirm(
     unique_id: str,
     session: Session = Depends(get_session),
 ):
-    username = current_username(request)
+    email = current_email(request)
     paper = session.exec(select(PaperRow).where(PaperRow.unique_id == unique_id)).first()
     if not paper:
         raise HTTPException(404)
     paper.status = ReviewStatus.confirmed
-    paper.last_modified_by = username
+    paper.last_modified_by = email
     paper.updated_at = datetime.utcnow()
-    _log(session, username, "confirm", f"paper:{paper.id}")
+    _log(session, email, "confirm", f"paper:{paper.id}")
     session.add(paper)
     session.commit()
     return RedirectResponse(f"/papers/{unique_id}", status_code=status.HTTP_303_SEE_OTHER)
@@ -277,14 +273,14 @@ def paper_delete(
     unique_id: str,
     session: Session = Depends(get_session),
 ):
-    username = current_username(request)
+    email = current_email(request)
     paper = session.exec(select(PaperRow).where(PaperRow.unique_id == unique_id)).first()
     if not paper:
         raise HTTPException(404)
     paper.status = ReviewStatus.deleted
-    paper.last_modified_by = username
+    paper.last_modified_by = email
     paper.updated_at = datetime.utcnow()
-    _log(session, username, "delete", f"paper:{paper.id}")
+    _log(session, email, "delete", f"paper:{paper.id}")
     session.add(paper)
     session.commit()
     return RedirectResponse("/", status_code=status.HTTP_303_SEE_OTHER)
@@ -301,7 +297,7 @@ async def effect_edit(
     es_id: int,
     session: Session = Depends(get_session),
 ):
-    username = current_username(request)
+    email = current_email(request)
     form = await request.form()
     es = session.get(EffectSizeRow, es_id)
     if not es:
@@ -330,9 +326,9 @@ async def effect_edit(
         es.status = (
             ReviewStatus.needs_reextraction if needs_reextraction else ReviewStatus.modified
         )
-        es.last_modified_by = username
+        es.last_modified_by = email
         es.updated_at = datetime.utcnow()
-        _log(session, username, "modify", f"effect_size:{es.id}", {"changes": changes})
+        _log(session, email, "modify", f"effect_size:{es.id}", {"changes": changes})
 
     session.add(es)
     session.commit()
@@ -347,14 +343,14 @@ def effect_confirm(
     es_id: int,
     session: Session = Depends(get_session),
 ):
-    username = current_username(request)
+    email = current_email(request)
     es = session.get(EffectSizeRow, es_id)
     if not es:
         raise HTTPException(404)
     es.status = ReviewStatus.confirmed
-    es.last_modified_by = username
+    es.last_modified_by = email
     es.updated_at = datetime.utcnow()
-    _log(session, username, "confirm", f"effect_size:{es.id}")
+    _log(session, email, "confirm", f"effect_size:{es.id}")
     session.add(es)
     session.commit()
     return RedirectResponse(
@@ -368,14 +364,14 @@ def effect_delete(
     es_id: int,
     session: Session = Depends(get_session),
 ):
-    username = current_username(request)
+    email = current_email(request)
     es = session.get(EffectSizeRow, es_id)
     if not es:
         raise HTTPException(404)
     es.status = ReviewStatus.deleted
-    es.last_modified_by = username
+    es.last_modified_by = email
     es.updated_at = datetime.utcnow()
-    _log(session, username, "delete", f"effect_size:{es.id}")
+    _log(session, email, "delete", f"effect_size:{es.id}")
     session.add(es)
     session.commit()
     return RedirectResponse(
@@ -389,7 +385,7 @@ async def effect_create(
     unique_id: str,
     session: Session = Depends(get_session),
 ):
-    username = current_username(request)
+    email = current_email(request)
     form = await request.form()
     paper = session.exec(select(PaperRow).where(PaperRow.unique_id == unique_id)).first()
     if not paper:
@@ -398,13 +394,13 @@ async def effect_create(
     es = EffectSizeRow(
         paper_unique_id=unique_id,
         status=ReviewStatus.modified,
-        last_modified_by=username,
+        last_modified_by=email,
         **kwargs,
     )
     session.add(es)
     session.commit()
     session.refresh(es)
-    _log(session, username, "add", f"effect_size:{es.id}", {"created": kwargs})
+    _log(session, email, "add", f"effect_size:{es.id}", {"created": kwargs})
     session.commit()
     return RedirectResponse(f"/papers/{unique_id}", status_code=status.HTTP_303_SEE_OTHER)
 
@@ -415,15 +411,15 @@ def effect_flag_reextract(
     es_id: int,
     session: Session = Depends(get_session),
 ):
-    username = current_username(request)
+    email = current_email(request)
     es = session.get(EffectSizeRow, es_id)
     if not es:
         raise HTTPException(404)
     es.needs_reextraction = True
     es.status = ReviewStatus.needs_reextraction
-    es.last_modified_by = username
+    es.last_modified_by = email
     es.updated_at = datetime.utcnow()
-    _log(session, username, "flag_reextract", f"effect_size:{es.id}")
+    _log(session, email, "flag_reextract", f"effect_size:{es.id}")
     session.add(es)
     session.commit()
     return RedirectResponse(
@@ -432,22 +428,84 @@ def effect_flag_reextract(
 
 
 # ---------------------------------------------------------------------------
-# Admin: Sheet sync
+# Admin: Sheet sync + user management
 # ---------------------------------------------------------------------------
 
 
 @app.get("/admin", response_class=HTMLResponse)
-def admin_panel(request: Request, msg: Optional[str] = None, err: Optional[str] = None):
+def admin_panel(
+    request: Request,
+    msg: Optional[str] = None,
+    err: Optional[str] = None,
+    session: Session = Depends(get_session),
+):
     require_admin(request)
+    users = list(session.exec(select(User).order_by(User.email)))
     return templates.TemplateResponse(
         request,
         "admin.html",
         {
             "msg": msg,
             "err": err,
-            "username": request.session.get("username"),
+            "display_name": request.session.get("display_name"),
             "sheet_id": os.environ.get("GOOGLE_SHEET_ID", ""),
+            "users": users,
         },
+    )
+
+
+@app.post("/admin/users/add")
+def admin_add_user(
+    request: Request,
+    email: str = Form(...),
+    display_name: str = Form(""),
+    is_admin: bool = Form(False),
+    session: Session = Depends(get_session),
+):
+    actor = require_admin(request)
+    from .auth import EMAIL_RE, normalize_email
+
+    norm = normalize_email(email)
+    if not EMAIL_RE.match(norm):
+        return RedirectResponse(
+            f"/admin?err=Invalid+email:+{norm}", status_code=status.HTTP_303_SEE_OTHER
+        )
+    existing = session.exec(select(User).where(User.email == norm)).first()
+    if existing:
+        existing.display_name = display_name or existing.display_name
+        existing.is_admin = is_admin
+        session.add(existing)
+        action = "update_user"
+    else:
+        session.add(User(email=norm, display_name=display_name, is_admin=is_admin))
+        action = "add_user"
+    _log(session, actor, action, f"user:{norm}", {"is_admin": is_admin, "display_name": display_name})
+    session.commit()
+    return RedirectResponse(
+        f"/admin?msg=User+saved:+{norm}", status_code=status.HTTP_303_SEE_OTHER
+    )
+
+
+@app.post("/admin/users/{user_id}/delete")
+def admin_delete_user(
+    request: Request,
+    user_id: int,
+    session: Session = Depends(get_session),
+):
+    actor = require_admin(request)
+    user = session.get(User, user_id)
+    if not user:
+        raise HTTPException(404)
+    if user.email == actor:
+        return RedirectResponse(
+            "/admin?err=Cannot+remove+yourself", status_code=status.HTTP_303_SEE_OTHER
+        )
+    deleted_email = user.email
+    session.delete(user)
+    _log(session, actor, "delete_user", f"user:{deleted_email}")
+    session.commit()
+    return RedirectResponse(
+        f"/admin?msg=Removed+{deleted_email}", status_code=status.HTTP_303_SEE_OTHER
     )
 
 
@@ -456,7 +514,7 @@ def admin_import(
     request: Request,
     session: Session = Depends(get_session),
 ):
-    username = require_admin(request)
+    actor = require_admin(request)
     try:
         papers, effects = pull_from_sheets()
         n_p, n_e = import_from_sheet_rows(_engine, papers, effects, replace=True)
@@ -464,13 +522,9 @@ def admin_import(
         return RedirectResponse(
             f"/admin?err={str(exc)[:300]}", status_code=status.HTTP_303_SEE_OTHER
         )
-    session.add(
-        AuditLog(
-            username=username,
-            action="import_sheet",
-            target="sheet",
-            payload={"papers": n_p, "effect_sizes": n_e},
-        )
+    _log(
+        session, actor, "import_sheet", "sheet",
+        {"papers": n_p, "effect_sizes": n_e},
     )
     session.commit()
     return RedirectResponse(
@@ -484,7 +538,7 @@ def admin_publish(
     request: Request,
     session: Session = Depends(get_session),
 ):
-    username = require_admin(request)
+    actor = require_admin(request)
     try:
         papers = list(
             session.exec(select(PaperRow).where(PaperRow.status != ReviewStatus.deleted))
@@ -497,19 +551,34 @@ def admin_publish(
         return RedirectResponse(
             f"/admin?err={str(exc)[:300]}", status_code=status.HTTP_303_SEE_OTHER
         )
-    session.add(
-        AuditLog(
-            username=username,
-            action="publish_sheet",
-            target="sheet",
-            payload={"papers": n_p, "effect_sizes": n_e},
-        )
+    _log(
+        session, actor, "publish_sheet", "sheet",
+        {"papers": n_p, "effect_sizes": n_e},
     )
     session.commit()
     return RedirectResponse(
         f"/admin?msg=Published+{n_p}+papers+and+{n_e}+effect+sizes",
         status_code=status.HTTP_303_SEE_OTHER,
     )
+
+
+# ---------------------------------------------------------------------------
+# Bootstrap: auto-create the first admin from ADMIN_BOOTSTRAP_EMAIL on startup
+# so a fresh Railway deploy is usable without shelling in.
+# ---------------------------------------------------------------------------
+
+
+@app.on_event("startup")
+def _bootstrap_admin() -> None:
+    bootstrap = os.environ.get("ADMIN_BOOTSTRAP_EMAIL", "").strip().lower()
+    if not bootstrap:
+        return
+    with Session(_engine) as session:
+        existing_users = session.exec(select(User)).first()
+        if existing_users:
+            return  # already populated; do nothing
+        session.add(User(email=bootstrap, display_name="Bootstrap admin", is_admin=True))
+        session.commit()
 
 
 # ---------------------------------------------------------------------------

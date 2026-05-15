@@ -119,11 +119,14 @@ class EffectSizeRow(SQLModel, table=True):
 
 
 class User(SQLModel, table=True):
+    """An allowed reviewer. No password — sign-in is by email only and is
+    purely an identification mechanism for audit logging."""
+
     __tablename__ = "users"
 
     id: Optional[int] = Field(default=None, primary_key=True)
-    username: str = Field(index=True, unique=True)
-    password_hash: str
+    email: str = Field(index=True, unique=True)
+    display_name: str = ""
     is_admin: bool = Field(default=False)
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
@@ -135,7 +138,7 @@ class AuditLog(SQLModel, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
     when: datetime = Field(default_factory=datetime.utcnow, index=True)
-    username: str
+    email: str
     action: str  # confirm | modify | delete | add | flag_reextract
     target: str  # "paper:<id>" or "effect_size:<id>"
     payload: dict = Field(default_factory=dict, sa_column=Column(JSON))

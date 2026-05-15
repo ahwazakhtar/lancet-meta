@@ -10,13 +10,12 @@ Typical flow:
 Other commands:
 
   python -m extraction status                   # progress summary
-  python -m extraction create-user --username u --admin
+  python -m extraction add-user --email you@example.com --admin
   python -m extraction reload-cache             # rebuild SQLite from cached JSON
 """
 
 from __future__ import annotations
 
-import getpass
 import logging
 import os
 from pathlib import Path
@@ -234,34 +233,33 @@ def publish() -> None:
 # ---------------------------------------------------------------------------
 
 
-@app.command("create-user")
-def create_user(
-    username: str = typer.Option(..., prompt=True),
-    admin: bool = typer.Option(False),
-    password: Optional[str] = typer.Option(None, help="Password (if omitted, will prompt)."),
+@app.command("add-user")
+def add_user(
+    email: str = typer.Option(..., prompt=True, help="Reviewer's email address."),
+    name: str = typer.Option("", help="Display name (optional)."),
+    admin: bool = typer.Option(False, help="Grant admin privileges."),
 ) -> None:
-    """Create a reviewer account for the web app."""
-    from webapp.auth import hash_password
+    """Allow an email to sign in to the review UI (no password)."""
+    from webapp.auth import EMAIL_RE, normalize_email
 
-    if password is None:
-        password = getpass.getpass("Password: ")
-        confirm = getpass.getpass("Confirm: ")
-        if password != confirm:
-            console.print("[red]Passwords do not match[/red]")
-            raise typer.Exit(1)
+    norm = normalize_email(email)
+    if not EMAIL_RE.match(norm):
+        console.print(f"[red]Invalid email: {email}[/red]")
+        raise typer.Exit(1)
 
     engine = get_engine(_db_path())
     with Session(engine) as session:
-        existing = session.exec(select(User).where(User.username == username)).first()
+        existing = session.exec(select(User).where(User.email == norm)).first()
         if existing:
-            console.print(f"[yellow]User '{username}' already exists; updating password.[/yellow]")
-            existing.password_hash = hash_password(password)
+            existing.display_name = name or existing.display_name
             existing.is_admin = admin
             session.add(existing)
+            verb = "updated"
         else:
-            session.add(User(username=username, password_hash=hash_password(password), is_admin=admin))
+            session.add(User(email=norm, display_name=name, is_admin=admin))
+            verb = "added"
         session.commit()
-    console.print(f"[green]User '{username}' created (admin={admin}).[/green]")
+    console.print(f"[green]Reviewer {verb}: {norm} (admin={admin})[/green]")
 
 
 @app.command()

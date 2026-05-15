@@ -1,54 +1,57 @@
-"""Session-cookie auth for the web app."""
+"""
+Email-only sign-in. No password.
+
+Reviewers identify themselves by entering an email that's in the User table.
+This is **not real authentication** — anyone who knows a reviewer's email
+can sign in as them. It exists purely so the audit log records who did what
+during a review session.
+
+Why this is OK here:
+- The deployment is internal (a small review team).
+- The Sheet sync is admin-gated; rogue edits get caught at publish time.
+- Real auth (passwords or OAuth) can be layered in later if needed.
+"""
 
 from __future__ import annotations
 
+import re
 from typing import Optional
 
-import bcrypt
 from fastapi import HTTPException, Request, status
 from sqlmodel import Session, select
 
 from extraction.storage import User
 
-# bcrypt truncates inputs longer than 72 bytes; pre-truncate to avoid the error.
-_MAX_BYTES = 72
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
-def hash_password(plain: str) -> str:
-    pw = plain.encode("utf-8")[:_MAX_BYTES]
-    return bcrypt.hashpw(pw, bcrypt.gensalt()).decode("ascii")
+def normalize_email(email: str) -> str:
+    return (email or "").strip().lower()
 
 
-def verify_password(plain: str, hashed: str) -> bool:
-    try:
-        pw = plain.encode("utf-8")[:_MAX_BYTES]
-        return bcrypt.checkpw(pw, hashed.encode("ascii"))
-    except (ValueError, TypeError):
-        return False
+def authenticate(session: Session, email: str) -> Optional[User]:
+    """Return the User if `email` is in the allowlist."""
+    email = normalize_email(email)
+    if not email or not EMAIL_RE.match(email):
+        return None
+    return session.exec(select(User).where(User.email == email)).first()
 
 
-def authenticate(session: Session, username: str, password: str) -> Optional[User]:
-    user = session.exec(select(User).where(User.username == username)).first()
-    if user and verify_password(password, user.password_hash):
-        return user
-    return None
+def current_email(request: Request) -> str:
+    """Return the signed-in email or raise 401."""
+    email = request.session.get("email")
+    if not email:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="not signed in")
+    return email
 
 
-def current_username(request: Request) -> str:
-    """Return the logged-in username or raise 401."""
-    username = request.session.get("username")
-    if not username:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="not logged in")
-    return username
-
-
-def current_user_optional(request: Request) -> Optional[str]:
-    return request.session.get("username")
+def current_email_optional(request: Request) -> Optional[str]:
+    return request.session.get("email")
 
 
 def require_admin(request: Request) -> str:
-    """Return the username and 403 if the session is not an admin."""
-    username = current_username(request)
+    """Return the email and 403 if the session is not an admin."""
+    email = current_email(request)
     if not request.session.get("is_admin"):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="admin only")
-    return username
+    return email

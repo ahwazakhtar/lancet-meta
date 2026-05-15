@@ -15,11 +15,11 @@
         <li><strong><a href="/">Lancet Meta Review</a></strong></li>
       </ul>
       <ul>
-        {% if username %}
+        {% if display_name %}
           {% if request.session.get('is_admin') %}
             <li><a href="/admin">Admin</a></li>
           {% endif %}
-          <li><span class="muted">{{ username }}</span></li>
+          <li><span class="muted">{{ display_name }}</span></li>
           <li>
             <form method="post" action="/logout" style="display:inline;margin:0;">
               <button class="secondary outline" type="submit">Sign out</button>

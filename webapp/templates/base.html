@@ -16,6 +16,9 @@
       </ul>
       <ul>
         {% if username %}
+          {% if request.session.get('is_admin') %}
+            <li><a href="/admin">Admin</a></li>
+          {% endif %}
           <li><span class="muted">{{ username }}</span></li>
           <li>
             <form method="post" action="/logout" style="display:inline;margin:0;">

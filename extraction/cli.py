@@ -1,28 +1,24 @@
 """
-Command-line interface for the extraction pipeline.
+Command-line interface for the local extraction pipeline.
 
-Examples:
+Typical flow:
 
-  # extract every PDF in ./pdfs into the local SQLite DB and JSON cache
-  python -m extraction extract
+  python -m extraction preprocess              # pdfs/ -> data/preprocessed/<doi>.md
+  python -m extraction extract                  # markdown -> SQLite + JSON cache
+  python -m extraction publish                  # SQLite -> Google Sheet
 
-  # extract one PDF
-  python -m extraction extract --pdf pdfs/Abdallah2021.pdf
+Other commands:
 
-  # push the SQLite state to Google Sheets
-  python -m extraction sync
-
-  # create a reviewer account for the web app
-  python -m extraction create-user --username ahwaz --admin
+  python -m extraction status                   # progress summary
+  python -m extraction create-user --username u --admin
+  python -m extraction reload-cache             # rebuild SQLite from cached JSON
 """
 
 from __future__ import annotations
 
 import getpass
-import json
 import logging
 import os
-from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -32,16 +28,17 @@ from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 from sqlmodel import Session, select
 
-from .extractor import ExtractionError, extract_paper
+from .extractor import ExtractionError, extract_from_markdown
+from .paper_list import load_paper_list, lookup_by_doi
+from .preprocess import preprocess_pdf
 from .schema import Paper
-from .sheets import sync_to_sheets
+from .sheets import push_to_sheets
 from .storage import (
     EffectSizeRow,
     PaperRow,
     ReviewStatus,
     User,
     get_engine,
-    list_effect_sizes,
     list_papers,
     upsert_paper,
 )
@@ -61,72 +58,152 @@ def _pdf_dir() -> Path:
     return Path(os.environ.get("PDF_DIR", "pdfs"))
 
 
+def _preprocessed_dir() -> Path:
+    p = Path(os.environ.get("PREPROCESSED_DIR", "data/preprocessed"))
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
 def _extracted_dir() -> Path:
     p = Path(os.environ.get("EXTRACTED_DIR", "data/extracted"))
     p.mkdir(parents=True, exist_ok=True)
     return p
 
 
-@app.command()
-def extract(
-    pdf: Optional[Path] = typer.Option(None, help="Single PDF to extract; otherwise process the whole PDF_DIR."),
-    skip_existing: bool = typer.Option(True, help="Skip PDFs already extracted (look for cache JSON)."),
-    limit: Optional[int] = typer.Option(None, help="Process at most N PDFs (useful for testing)."),
-) -> None:
-    """Run extraction over one PDF or every PDF in PDF_DIR."""
+def _xlsx_path() -> Path:
+    return Path(os.environ.get("PAPER_LIST_XLSX", "base-data/field and paper list.xlsx"))
 
-    engine = get_engine(_db_path())
-    cache_dir = _extracted_dir()
+
+# ---------------------------------------------------------------------------
+# Preprocess: PDF -> markdown keyed by DOI
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def preprocess(
+    pdf: Optional[Path] = typer.Option(None, help="Single PDF to preprocess; otherwise the whole PDF_DIR."),
+    skip_existing: bool = typer.Option(True, help="Skip PDFs whose markdown already exists."),
+    limit: Optional[int] = typer.Option(None, help="Process at most N PDFs."),
+) -> None:
+    """Convert PDFs into DOI-standardized markdown (text + tables)."""
+    out_dir = _preprocessed_dir()
 
     if pdf is not None:
         pdfs = [pdf]
     else:
         pdfs = sorted(_pdf_dir().glob("*.pdf"))
         if not pdfs:
-            console.print(f"[yellow]No PDFs found in {_pdf_dir()}[/yellow]")
+            console.print(f"[yellow]No PDFs in {_pdf_dir()}[/yellow]")
             raise typer.Exit(0)
-
     if limit is not None:
         pdfs = pdfs[:limit]
 
-    console.print(f"Found [bold]{len(pdfs)}[/bold] PDF(s) to process")
+    console.print(f"Preprocessing [bold]{len(pdfs)}[/bold] PDF(s) -> {out_dir}")
 
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        TimeElapsedColumn(),
-        console=console,
-    ) as progress:
-        task = progress.add_task("Extracting...", total=len(pdfs))
-        for pdf_path in pdfs:
-            cache_file = cache_dir / f"{pdf_path.stem}.json"
+    with Progress(SpinnerColumn(), TextColumn("{task.description}"), TimeElapsedColumn(), console=console) as prog:
+        task = prog.add_task("Preprocessing", total=len(pdfs))
+        for p in pdfs:
+            try:
+                result = preprocess_pdf(p, out_dir)
+            except Exception as exc:  # noqa: BLE001
+                prog.console.log(f"[red]FAIL[/red] {p.name}: {exc}")
+                prog.advance(task)
+                continue
+            doi_repr = result.doi or "(no DOI)"
+            note = "" if not skip_existing else ""
+            prog.console.log(
+                f"[green]OK[/green] {p.name} -> {result.md_path.name} "
+                f"(doi={doi_repr}, pages={result.n_pages}, tables={result.n_tables})"
+            )
+            prog.advance(task)
+
+
+# ---------------------------------------------------------------------------
+# Extract: markdown -> SQLite + JSON cache
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def extract(
+    md: Optional[Path] = typer.Option(None, help="Single markdown file; otherwise the whole preprocessed dir."),
+    skip_existing: bool = typer.Option(True, help="Skip markdowns already in the JSON cache."),
+    limit: Optional[int] = typer.Option(None, help="Process at most N files."),
+    require_doi: bool = typer.Option(False, help="Skip papers with no DOI match in the xlsx."),
+) -> None:
+    """Run Claude over each preprocessed markdown to produce structured data."""
+    engine = get_engine(_db_path())
+    cache_dir = _extracted_dir()
+    by_doi, _all = load_paper_list(_xlsx_path())
+
+    if md is not None:
+        files = [md]
+    else:
+        files = sorted(_preprocessed_dir().glob("*.md"))
+        if not files:
+            console.print(f"[yellow]No markdown in {_preprocessed_dir()} — did you run `preprocess` first?[/yellow]")
+            raise typer.Exit(0)
+    if limit is not None:
+        files = files[:limit]
+
+    console.print(f"Extracting [bold]{len(files)}[/bold] paper(s)")
+
+    with Progress(SpinnerColumn(), TextColumn("{task.description}"), TimeElapsedColumn(), console=console) as prog:
+        task = prog.add_task("Extracting", total=len(files))
+        for md_path in files:
+            cache_file = cache_dir / f"{md_path.stem}.json"
             if skip_existing and cache_file.exists():
-                progress.console.log(f"skip (cached): {pdf_path.name}")
-                progress.advance(task)
+                prog.console.log(f"skip (cached): {md_path.name}")
+                prog.advance(task)
                 continue
 
-            progress.update(task, description=f"Extracting {pdf_path.name}")
+            # Recover DOI from the markdown header (we wrote it during preprocess).
+            doi = _doi_from_md(md_path)
+            entry = lookup_by_doi(by_doi, doi) if doi else None
+            if require_doi and entry is None:
+                prog.console.log(f"[yellow]skip[/yellow] {md_path.name}: no xlsx match for doi={doi}")
+                prog.advance(task)
+                continue
+
+            prog.update(task, description=f"Extracting {md_path.name}")
             try:
-                paper = extract_paper(pdf_path)
+                paper = extract_from_markdown(md_path, source_pdf=md_path.name, xlsx_entry=entry)
             except ExtractionError as exc:
-                progress.console.log(f"[red]FAIL[/red] {pdf_path.name}: {exc}")
-                progress.advance(task)
+                prog.console.log(f"[red]FAIL[/red] {md_path.name}: {exc}")
+                prog.advance(task)
                 continue
 
             cache_file.write_text(paper.model_dump_json(indent=2))
             upsert_paper(engine, paper)
-            progress.console.log(
-                f"[green]OK[/green] {pdf_path.name}: {len(paper.effect_sizes)} effect size(s)"
+            prog.console.log(
+                f"[green]OK[/green] {md_path.name}: {paper.unique_id} · {len(paper.effect_sizes)} effect size(s)"
             )
-            progress.advance(task)
+            prog.advance(task)
+
+
+def _doi_from_md(md_path: Path) -> Optional[str]:
+    """Read the DOI line from a preprocessed markdown file (we wrote it at the top)."""
+    try:
+        with md_path.open("r", encoding="utf-8") as f:
+            for i, line in enumerate(f):
+                if i > 5:
+                    break
+                if line.startswith("DOI:"):
+                    return line.split(":", 1)[1].strip()
+    except OSError:
+        pass
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Cache / publish utilities
+# ---------------------------------------------------------------------------
 
 
 @app.command()
 def reload_cache() -> None:
     """Re-import every JSON file in EXTRACTED_DIR into the SQLite DB."""
     engine = get_engine(_db_path())
-    cache_dir = _extracted_dir()
-    files = sorted(cache_dir.glob("*.json"))
+    files = sorted(_extracted_dir().glob("*.json"))
     console.print(f"Reloading {len(files)} cached extractions...")
     for f in files:
         try:
@@ -138,24 +215,23 @@ def reload_cache() -> None:
 
 
 @app.command()
-def sync() -> None:
-    """Push the current SQLite contents to Google Sheets."""
+def publish() -> None:
+    """Push the local SQLite contents to Google Sheets (overwrites the two tabs)."""
     engine = get_engine(_db_path())
     with Session(engine) as session:
         papers = list(
-            session.exec(
-                select(PaperRow).where(PaperRow.status != ReviewStatus.deleted)
-            )
+            session.exec(select(PaperRow).where(PaperRow.status != ReviewStatus.deleted))
         )
         effects = list(
-            session.exec(
-                select(EffectSizeRow).where(EffectSizeRow.status != ReviewStatus.deleted)
-            )
+            session.exec(select(EffectSizeRow).where(EffectSizeRow.status != ReviewStatus.deleted))
         )
-    sync_to_sheets(papers, effects)
-    console.print(
-        f"[green]Pushed[/green] {len(papers)} papers and {len(effects)} effect sizes."
-    )
+    n_p, n_e = push_to_sheets(papers, effects)
+    console.print(f"[green]Published[/green] {n_p} papers and {n_e} effect sizes.")
+
+
+# ---------------------------------------------------------------------------
+# User management + status
+# ---------------------------------------------------------------------------
 
 
 @app.command("create-user")
@@ -201,8 +277,10 @@ def status() -> None:
         console.print(f"  {s}: {n}")
 
     pdf_count = len(list(_pdf_dir().glob("*.pdf")))
+    md_count = len(list(_preprocessed_dir().glob("*.md")))
     cache_count = len(list(_extracted_dir().glob("*.json")))
     console.print(f"PDFs available: {pdf_count}")
+    console.print(f"Preprocessed markdown: {md_count}")
     console.print(f"Cached JSON extractions: {cache_count}")
 
 

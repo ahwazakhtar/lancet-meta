@@ -40,8 +40,10 @@ class PaperRow(SQLModel, table=True):
     source_pdf: str = ""
 
     doi: str = ""
+    title: str = ""
     authors: str = ""
     year: str = ""
+    journal: str = ""
     country_region: str = ""
     funding_source: str = ""
     publication_type: str = ""
@@ -202,3 +204,82 @@ def list_effect_sizes(engine, paper_unique_id: str) -> list[EffectSizeRow]:
                 .order_by(EffectSizeRow.id)
             )
         )
+
+
+def _coerce_status(value: str) -> ReviewStatus:
+    try:
+        return ReviewStatus(value)
+    except (ValueError, TypeError):
+        return ReviewStatus.pending
+
+
+def _coerce_bool(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"true", "1", "yes", "y"}
+
+
+def import_from_sheet_rows(
+    engine,
+    paper_rows: list[dict],
+    effect_rows: list[dict],
+    replace: bool = True,
+) -> tuple[int, int]:
+    """Bulk-load rows fetched from Google Sheets into the local SQLite DB.
+
+    By default (replace=True) the DB is wiped before inserting so the local
+    state matches the Sheet exactly. Pass replace=False to upsert.
+    """
+    paper_cols = {c.name for c in PaperRow.__table__.columns} - {"id"}
+    effect_cols = {c.name for c in EffectSizeRow.__table__.columns} - {"id"}
+
+    with Session(engine) as session:
+        if replace:
+            for r in session.exec(select(EffectSizeRow)).all():
+                session.delete(r)
+            for r in session.exec(select(PaperRow)).all():
+                session.delete(r)
+            session.flush()
+
+        n_p = 0
+        for row in paper_rows:
+            unique_id = (row.get("unique_id") or "").strip()
+            if not unique_id:
+                continue
+            kwargs = {}
+            for k in paper_cols:
+                if k in row:
+                    kwargs[k] = row[k]
+            kwargs["unique_id"] = unique_id
+            kwargs["status"] = _coerce_status(row.get("status", "pending"))
+            kwargs["needs_reextraction"] = _coerce_bool(row.get("needs_reextraction"))
+            existing = session.exec(
+                select(PaperRow).where(PaperRow.unique_id == unique_id)
+            ).first()
+            if existing and not replace:
+                for k, v in kwargs.items():
+                    setattr(existing, k, v)
+                session.add(existing)
+            else:
+                session.add(PaperRow(**kwargs))
+            n_p += 1
+
+        n_e = 0
+        for row in effect_rows:
+            paper_uid = (row.get("paper_unique_id") or "").strip()
+            if not paper_uid:
+                continue
+            kwargs = {}
+            for k in effect_cols:
+                if k in row:
+                    kwargs[k] = row[k]
+            kwargs["paper_unique_id"] = paper_uid
+            kwargs["status"] = _coerce_status(row.get("status", "pending"))
+            kwargs["needs_reextraction"] = _coerce_bool(row.get("needs_reextraction"))
+            session.add(EffectSizeRow(**kwargs))
+            n_e += 1
+
+        session.commit()
+    return n_p, n_e

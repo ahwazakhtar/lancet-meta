@@ -3,43 +3,68 @@
 PDF → structured-extraction pipeline plus reviewer web app for the Lancet
 gun-violence meta-analysis described in [`vision.md`](vision.md).
 
-## What it does
+## Architecture
 
-1. **Extract** — reads each paper PDF locally, asks Claude (via the Claude
-   Agent SDK using your local Claude Max / Pro login) to fill in the fields
-   defined in `base-data/field and paper list.xlsx`, and pulls out every
-   effect size reported in the paper.
-2. **Store** — extractions land in a local SQLite database (`data/app.db`)
-   and a JSON cache (`data/extracted/<paper>.json`). One command pushes the
-   current state to a Google Sheet (two tabs: `papers` and `effect_sizes`).
-3. **Review** — a FastAPI + Jinja + HTMX web app lets multiple reviewers log
-   in, confirm / modify / delete / add effect sizes per paper, and flag
-   anything that needs re-extraction.
+```
+[Your laptop]                                 [Google Sheet]                 [Railway: web app]
+                                                                            (SQLite on volume)
+PDFs in ./pdfs/ (any filename)
+  │
+  ▼ python -m extraction preprocess
+data/preprocessed/<sanitized-doi>.md         ┌── papers tab ─────────────┐
+  + DOI extracted from PDF text              │   effect_sizes tab        │
+  + text & tables in markdown                └───────────────────────────┘
+  │                                                ▲                ▼
+  ▼ python -m extraction extract                   │           Admin clicks
+data/extracted/<doi>.json (cache)                  │       "Import from Sheet"
+data/app.db (local SQLite)                         │                ▼
+  + xlsx lookup by DOI fills in                    │           Railway SQLite
+    title/authors/year/journal                     │                ▼
+  │                                                │           Reviewers edit
+  ▼ python -m extraction publish ─────────────────►│                ▼
+                                                   ◄──── "Publish to Sheet"
+```
+
+- **Local**: PDFs are renamed-by-DOI during preprocessing, parsed to markdown
+  (text + every table), then Claude extracts effect sizes from the markdown
+  using your **Claude Max / Pro account** via the local `claude` CLI (no API
+  key needed). Bibliographic metadata is pulled from
+  `base-data/field and paper list.xlsx` so the LLM doesn't have to guess.
+- **Google Sheet**: the integration point. Local pipeline writes to it;
+  Railway web app reads from / writes to it. Reviewers do **not** edit the
+  Sheet directly — the Sheet is overwritten by both sides.
+- **Railway**: hosts the FastAPI + Jinja + HTMX review UI on a managed
+  container with a SQLite database on a mounted volume.
 
 ## Layout
 
 ```
-extraction/        Pipeline (Claude Agent SDK + Google Sheets sync)
-  schema.py        Pydantic models + field list mirrored from the xlsx
-  prompts.py       The extraction prompt
-  extractor.py     Claude Agent SDK driver (one paper -> one Paper object)
-  storage.py       SQLite tables (papers, effect_sizes, users, audit_log)
-  sheets.py        Google Sheets sync
+extraction/        Local pipeline
+  preprocess.py    PDF -> markdown keyed by DOI
+  paper_list.py    Load base-data xlsx and match by DOI
+  prompts.py       Claude extraction prompt
+  extractor.py     Claude Agent SDK driver
+  storage.py       SQLite schema + Sheet-row importer
+  sheets.py        Google Sheets push/pull
   cli.py           `python -m extraction ...`
 
-webapp/            Reviewer UI
+webapp/            Reviewer UI (deployable)
   main.py          FastAPI app
   auth.py          Session cookie + bcrypt
-  templates/       Jinja2 templates
-  static/app.css   Pico CSS overrides
+  templates/       Jinja2 templates (Pico CSS + HTMX)
+  static/app.css
 
-base-data/         Source-of-truth field list and paper list (xlsx) + example CSV
-pdfs/              Drop PDFs here (gitignored). Filename = unique_id + .pdf
-data/              Extracted JSON + SQLite (gitignored)
-.credentials/      Google service-account JSON (gitignored)
+base-data/         Curated field list + paper list (xlsx) + example CSV
+pdfs/              Drop PDFs here, any filename (local, gitignored)
+data/              Preprocessed MD, extracted JSON, SQLite (gitignored)
+.credentials/      Google service-account JSON (local, gitignored)
+
+Procfile           Railway start command
+railway.toml       Railway deploy config
+nixpacks.toml      Railway build config
 ```
 
-## Setup
+## Local setup (extraction)
 
 Requirements:
 
@@ -47,120 +72,137 @@ Requirements:
 - Node.js (the Claude Agent SDK spawns Claude Code as a subprocess)
 - The `claude` CLI installed and signed in with your Claude Max / Pro
   account (`claude login`)
+- A Google Cloud service account with the Sheets API enabled
 
 ```bash
-# 1. Install
 python -m venv .venv && source .venv/bin/activate
 pip install -e .
-
-# 2. Configure
 cp .env.example .env
-# Edit .env: at minimum set GOOGLE_SHEET_ID, GOOGLE_SERVICE_ACCOUNT_FILE,
-# and WEB_SECRET_KEY.
+# Edit .env: GOOGLE_SHEET_ID, GOOGLE_SERVICE_ACCOUNT_FILE, WEB_SECRET_KEY
 
-# 3. Google Sheets
-#   - Create a service account in Google Cloud, download the JSON key
-#     to .credentials/google-service-account.json
-#   - Create a Google Sheet, share it (Editor) with the service account email
-#   - Put the Sheet ID (from the URL) into .env
+# Google Sheet: create one, share it (Editor) with the service account email,
+# put its ID into GOOGLE_SHEET_ID.
 
-# 4. Create your first user
-python -m extraction create-user --username ahwaz --admin
+# Drop the PDFs anywhere into ./pdfs/ (names don't matter).
+mkdir -p pdfs
 ```
 
-## Usage
-
-### Extracting papers
-
-Drop the PDFs into `./pdfs/`. Name each file so the prefix matches the
-"Study" column in `base-data/field and paper list.xlsx` (e.g.
-`Abdallah2021.pdf`). Then:
+### Running the pipeline
 
 ```bash
-# Extract every PDF in ./pdfs (skips ones with a cached JSON)
+# 1. Preprocess every PDF -> data/preprocessed/<sanitized-doi>.md
+python -m extraction preprocess
+
+# 2. Run Claude over each markdown -> SQLite + JSON cache
+#    Skip papers without a DOI match in the xlsx with --require-doi.
 python -m extraction extract
 
-# Or a single paper
-python -m extraction extract --pdf pdfs/Abdallah2021.pdf
+# 3. Push the SQLite contents to the Google Sheet
+python -m extraction publish
 
-# Quick test with the first 3 PDFs
-python -m extraction extract --limit 3 --skip-existing
-
-# See progress
-python -m extraction status
+# Other useful commands
+python -m extraction status                  # progress summary
+python -m extraction extract --limit 3       # try a few PDFs first
+python -m extraction reload-cache            # rebuild SQLite from cached JSON
 ```
 
-What happens for each PDF:
-1. The Agent SDK launches Claude Code locally with read access to the PDF.
-2. Claude returns a JSON object with paper-level fields + a list of effect
-   sizes (one row per effect size found in tables or text).
-3. The JSON is cached to `data/extracted/<stem>.json`.
-4. The SQLite DB is upserted: the paper row + all its effect sizes.
+Notes:
+- **DOIs are required for xlsx matching** — papers without a discoverable DOI
+  still get extracted but won't have curated title/authors/year prefilled.
+- Missing fields are stored as the literal string `"data not available"` per
+  the protocol. Claude is instructed never to invent values.
 
-Missing values are recorded as the literal string `"data not available"` per
-the vision doc — the LLM is instructed never to invent data.
+## Deploying the web app to Railway
 
-### Pushing to Google Sheets
+The deployed web app runs **independently** of your local pipeline. It uses
+the same code, just hits a different SQLite path (on a mounted volume) and
+talks to the same Google Sheet.
+
+### 1. Push this repo
+
+Railway can deploy from GitHub.
+
+### 2. Create the project
+
+In the Railway dashboard:
+
+1. **New project → Deploy from GitHub repo** → point at this repo.
+2. Railway detects the `nixpacks.toml` / `Procfile` and starts a Python build.
+3. **Add a Volume**: in the service settings, attach a 1 GB volume with
+   mount path `/data`.
+
+### 3. Environment variables
+
+In the service's Variables tab, set:
+
+| Variable | Value |
+| -------- | ----- |
+| `WEB_DB_PATH` | `/data/app.db` |
+| `WEB_SECRET_KEY` | a long random string (`openssl rand -hex 32`) |
+| `GOOGLE_SHEET_ID` | the ID of the Sheet you created |
+| `GOOGLE_SERVICE_ACCOUNT_JSON` | **paste the raw JSON** of the service-account key (one line, no file) |
+| `PAPERS_SHEET_NAME` | `papers` (optional, default) |
+| `EFFECT_SIZES_SHEET_NAME` | `effect_sizes` (optional, default) |
+
+Railway sets `PORT` automatically; you don't need to set `WEB_HOST` or
+`WEB_PORT`.
+
+### 4. Generate a public domain
+
+Settings → Networking → **Generate Domain**. Railway gives you something
+like `your-app.up.railway.app`.
+
+### 5. Create reviewer accounts
+
+Two options:
+
+**A. Locally, then publish:** create the users in your local SQLite and
+publish to the Sheet — but users don't live in the Sheet, so this won't
+work. Use option B.
+
+**B. SSH into the Railway container** (Railway → service → "Run a command")
+and run:
 
 ```bash
-python -m extraction sync
+python -m extraction create-user --username ahwaz --admin
+python -m extraction create-user --username reviewer1
 ```
 
-This wipes the `papers` and `effect_sizes` tabs and writes the current
-SQLite contents. Status changes from the reviewer UI are included.
+These commands write to `/data/app.db` inside the container, where the web
+app picks them up.
 
-### Running the review UI
+### 6. Usage on the deployed app
 
-```bash
-lancet-web
-# or
-uvicorn webapp.main:app --reload --host 127.0.0.1 --port 8000
-```
+- Reviewers visit the domain, sign in, see the list of papers.
+- After you run a local `preprocess` → `extract` → `publish`, log in as an
+  **admin**, go to `/admin`, and click **Import from Sheet → web app**. The
+  new papers (and any updates to existing ones) appear in the review UI.
+- When reviewers finish a batch of edits, an admin clicks **Publish web app
+  → Sheet** to overwrite the Sheet with the current edited state.
 
-Open `http://127.0.0.1:8000/`, sign in with the user you created. From the
-paper-list page click any paper to:
+### Notes / caveats
 
-- Edit paper-level fields and save.
-- Confirm / delete the paper.
-- Edit each effect size in place. Save / Confirm / Delete / flag
-  "Needs re-extraction".
-- Add a new effect size that the pipeline missed.
+- The SQLite DB on the Railway volume is the source of truth for **reviewer
+  edits**. Each "Import from Sheet" **replaces** the entire DB with the
+  Sheet contents — so always **publish before importing** if there are
+  unsaved edits, otherwise they'll be overwritten by the Sheet.
+- Railway free tier is fine for ~351 papers / a few thousand effect sizes.
+- The CLI commands (`extract`, `publish`, etc.) are **not** intended to be
+  run on Railway routinely — the local pipeline does the LLM work, the
+  cloud app does the review work. The only CLI usage on Railway is
+  `create-user`.
 
-Every change is appended to the `audit_log` table with the username and
-timestamp.
+## How the data flows back to the Sheet
 
-### Flagged for re-extraction
+Reviewer actions:
+- **Confirm** — marks a row as confirmed (status badge in the UI).
+- **Edit + Save** — overwrites fields; status becomes `modified`.
+- **Delete** — soft-deletes; row is hidden from list and excluded from
+  publishes.
+- **Add effect size** — inserts a new row tied to that paper.
+- **Flag re-extraction** — sets status to `needs_reextraction` so the local
+  pipeline can re-process that paper.
 
-When a reviewer flags a paper or effect size as "needs re-extraction", the
-paper's status is set to `needs_reextraction`. To re-process those papers,
-delete their cached JSON (and optionally their effect-size rows) and re-run
-`extract`:
-
-```bash
-python -m extraction extract --pdf pdfs/Wilcox2013.pdf --no-skip-existing
-```
-
-## Notes on the LLM
-
-- The pipeline uses [`claude-agent-sdk`](https://pypi.org/project/claude-agent-sdk/),
-  which spawns `claude` (Claude Code) as a subprocess and authenticates via
-  your existing local login. **No API key is required** if your `claude`
-  CLI is signed into Claude Max / Pro.
-- The system prompt and extraction prompt are in `extraction/prompts.py`.
-- The PDF is passed by *path* to Claude (which uses its `Read` tool). PDFs
-  up to Claude's normal document limits work directly; very long PDFs may
-  need pre-processing (`pdfplumber` is already a dependency for future
-  table-only fallbacks).
-
-## Known limitations / next steps
-
-- No table-extraction pre-pass yet — Claude reads PDFs directly. If you see
-  table data being missed, we can add a `pdfplumber`-based pre-extraction
-  step that supplies tables in markdown alongside the PDF.
-- The Sheets sync is a one-way push from SQLite. If you want edits made
-  directly in the Sheet to flow back, that's an additional `pull` command
-  to add.
-- No bulk-import of the paper list from `base-data/field and paper
-  list.xlsx` yet — the pipeline indexes by PDF filename. We can add a
-  "seed papers from xlsx" command if you want all 351 listed papers visible
-  in the UI before their PDFs arrive.
+Every action is appended to the `audit_log` table with the username and
+timestamp. The Sheet column layout is in `extraction/sheets.py`
+(`PAPER_SHEET_COLUMNS`, `EFFECT_SIZE_SHEET_COLUMNS`).

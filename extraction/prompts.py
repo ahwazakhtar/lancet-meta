@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+from typing import Optional
 
+from .paper_list import PaperListEntry
 from .schema import EFFECT_SIZE_FIELDS, PAPER_FIELDS, FieldSpec
 
 NA = "data not available"
@@ -19,8 +21,13 @@ def _field_table(fields: list[FieldSpec]) -> str:
     return "\n".join(lines)
 
 
-def build_extraction_prompt(pdf_path: str) -> str:
-    """Prompt sent to Claude (via Agent SDK) to extract a single paper."""
+def build_extraction_prompt(md_path: str, xlsx_entry: Optional[PaperListEntry] = None) -> str:
+    """Prompt sent to Claude (via Agent SDK) to extract a single paper.
+
+    `md_path` is the path of the pre-processed markdown (text + tables).
+    `xlsx_entry` is the curated paper-list row matched to this paper (if any),
+    which Claude should treat as authoritative for bibliographic metadata.
+    """
 
     paper_fields = _field_table(PAPER_FIELDS)
     es_fields = _field_table(EFFECT_SIZE_FIELDS)
@@ -28,9 +35,10 @@ def build_extraction_prompt(pdf_path: str) -> str:
     schema_skeleton = {
         "doi": NA,
         "unique_id": NA,
+        "title": NA,
         "authors": NA,
         "year": NA,
-        "country_region": NA,
+        "journal": NA,
         "...": "all paper-level fields below",
         "effect_sizes": [
             {
@@ -41,20 +49,41 @@ def build_extraction_prompt(pdf_path: str) -> str:
         ],
     }
 
-    return f"""You are an expert evidence-synthesis assistant extracting structured data from a
-research paper for a Lancet meta-analysis on gun violence interventions.
+    if xlsx_entry is not None:
+        biblio_block = f"""
+# Authoritative bibliographic metadata (from curated paper list)
+
+Use these values verbatim for the corresponding fields — they have already
+been hand-curated and should not be re-derived from the PDF.
+
+- `doi`: {xlsx_entry.doi or NA}
+- `title`: {xlsx_entry.title or NA}
+- `authors`: {xlsx_entry.authors or NA}
+- `year`: {xlsx_entry.year or NA}
+- `journal`: {xlsx_entry.journal or NA}
+- `unique_id`: {(xlsx_entry.study_id or NA).replace(" ", "")}
+"""
+    else:
+        biblio_block = ""
+
+    return f"""You are an expert evidence-synthesis assistant extracting structured data
+from a research paper for a Lancet meta-analysis on gun violence interventions.
 
 # Task
 
-Read the PDF at path: `{pdf_path}`
+Read the pre-processed markdown for the paper at path: `{md_path}`
 
-Extract two things:
+The markdown contains the paper's full text by page, followed by every table
+extracted from the PDF rendered as a markdown table. Effect sizes will most
+often be in the tables — read them carefully.
+{biblio_block}
+# What to extract
 
-1. **Paper-level fields** that describe the whole paper (authors, design,
+1. **Paper-level fields** that describe the whole paper (design,
    intervention, etc.).
 2. **Effect sizes**: every quantitative estimate of the difference between
-   comparison groups that the paper reports. Look in tables, figures, and
-   results text. An effect size is any of: difference in means, regression
+   comparison groups that the paper reports. Look in the tables, then the
+   results text. Effect sizes include: difference in means, regression
    coefficient, odds ratio, risk ratio, incidence rate ratio, hazard ratio,
    standardised mean difference, percentage change, beta coefficient, etc.
 
@@ -65,22 +94,19 @@ Extract two things:
 
 # Rules
 
-- Only extract what the PDF actually contains. **Do not invent values.**
-- For any field where the paper does not provide a value, set it to the
-  exact string "data not available".
-- Preserve the paper's reported numbers verbatim (don't reformat units, don't
-  recompute, don't round).
+- Only extract what the markdown actually contains. **Do not invent values.**
+- For any field the paper does not provide, use the exact string
+  "data not available".
+- Preserve the paper's reported numbers verbatim (don't reformat units,
+  recompute, or round).
 - Numeric fields (`effect_value`, `lower_ci`, `upper_ci`, `variance_se`,
-  `outcome_timeframe_months`, `year`) should be the number as a string when
-  available; otherwise "data not available".
-- `unique_id` should be `<FirstAuthorSurname><Year>`, e.g. `Wilcox2013`.
-- Direction of effect should be one of: "↓ beneficial", "↑ harmful",
-  "↔ null", or "data not available" if direction is unclear.
+  `outcome_timeframe_months`, `year`) should hold the number as a string when
+  available, else "data not available".
+- Direction of effect: one of "↓ beneficial", "↑ harmful", "↔ null", or
+  "data not available" if direction is unclear.
 - Be exhaustive about effect sizes — papers often have many across tables.
-  Each subgroup or timepoint typically warrants a separate row.
-- If a paper reports effect sizes for multiple outcomes (e.g. homicide rate
-  AND non-fatal injury), emit one effect-size row per outcome × timepoint ×
-  subgroup combination.
+  Each subgroup × timepoint × outcome combination typically warrants its own
+  row.
 
 # Paper-level fields
 
@@ -93,11 +119,11 @@ Extract two things:
 # Output
 
 Respond with a SINGLE JSON object — no markdown fences, no commentary before
-or after, just JSON — that matches this shape:
+or after, just the JSON — matching this shape:
 
 {json.dumps(schema_skeleton, indent=2)}
 
-Make sure every paper-level field above appears as a key, even if the value
-is "data not available". `effect_sizes` is a list (possibly empty if the
-paper truly reports no quantitative comparisons).
+Every paper-level field above must appear as a key, even if the value is
+"data not available". `effect_sizes` is a list (possibly empty if the paper
+truly reports no quantitative comparisons).
 """

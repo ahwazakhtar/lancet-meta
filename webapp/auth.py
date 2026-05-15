@@ -44,3 +44,11 @@ def current_username(request: Request) -> str:
 
 def current_user_optional(request: Request) -> Optional[str]:
     return request.session.get("username")
+
+
+def require_admin(request: Request) -> str:
+    """Return the username and 403 if the session is not an admin."""
+    username = current_username(request)
+    if not request.session.get("is_admin"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="admin only")
+    return username

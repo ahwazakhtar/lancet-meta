@@ -32,8 +32,10 @@ class FieldSpec(BaseModel):
 PAPER_FIELDS: list[FieldSpec] = [
     FieldSpec(name="doi", notes="DOI link of the paper", example="10.1007/s11121-019-01064-8"),
     FieldSpec(name="unique_id", notes="Concatenation of first-author surname + year", example="Wilcox2013"),
+    FieldSpec(name="title", notes="Paper title", example="A comprehensive evaluation of …"),
     FieldSpec(name="authors", notes="Full citation string of the authors", example="Wilcox, D.W. et al."),
     FieldSpec(name="year", notes="Publication year", example="2013"),
+    FieldSpec(name="journal", notes="Journal / venue", example="JAMA Pediatrics"),
     FieldSpec(name="country_region", notes="Free text or ISO-3 code", example="USA – Baltimore MD"),
     FieldSpec(name="funding_source", notes="Government, foundation, undisclosed, etc.", example="CDC"),
     FieldSpec(name="publication_type", notes="Journal article / report / thesis / pre-print", example="Peer-reviewed"),
@@ -138,8 +140,10 @@ class Paper(BaseModel):
     # Paper-level fields.
     doi: str = NA
     unique_id: str = NA
+    title: str = NA
     authors: str = NA
     year: str = NA
+    journal: str = NA
     country_region: str = NA
     funding_source: str = NA
     publication_type: str = NA

@@ -14,7 +14,11 @@
     <div class="flex-row">
       <hgroup>
         <h2>{{ paper.unique_id }}</h2>
+        {% if paper.title %}
+          <p style="font-size: 1.05rem;">{{ paper.title }}</p>
+        {% endif %}
         <p>
+          {% if paper.journal %}<span class="muted">{{ paper.journal }} · {{ paper.year }}</span><br>{% endif %}
           <span class="badge badge-{{ paper.status.value }}">{{ paper.status.value }}</span>
           {% if paper.needs_reextraction %}<span class="badge badge-reextract">re-extract</span>{% endif %}
           {% if paper.last_modified_by %}

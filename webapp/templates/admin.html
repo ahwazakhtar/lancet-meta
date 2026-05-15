@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}Admin · Lancet Meta Review{% endblock %}
+{% block content %}
+
+<nav aria-label="breadcrumb">
+  <ul>
+    <li><a href="/">All papers</a></li>
+    <li>Admin</li>
+  </ul>
+</nav>
+
+<hgroup>
+  <h2>Admin</h2>
+  <p>Sync the working database with the Google Sheet.</p>
+</hgroup>
+
+{% if msg %}<p class="msg-success">{{ msg }}</p>{% endif %}
+{% if err %}<p class="msg-error">Error: {{ err }}</p>{% endif %}
+
+<article>
+  <header><strong>Sheet</strong></header>
+  <p>
+    Google Sheet ID:
+    {% if sheet_id %}
+      <code>{{ sheet_id }}</code>
+      &middot;
+      <a href="https://docs.google.com/spreadsheets/d/{{ sheet_id }}/edit" target="_blank" rel="noopener">Open</a>
+    {% else %}
+      <span class="muted">not configured (set GOOGLE_SHEET_ID)</span>
+    {% endif %}
+  </p>
+
+  <div class="grid">
+    <form method="post" action="/admin/import-from-sheet"
+          onsubmit="return confirm('This REPLACES every paper and effect size in the web app with what is in the Sheet. Continue?');">
+      <button type="submit">Import from Sheet → web app</button>
+      <small class="muted">Run this after a local extraction + publish to pull the new papers into the review UI.</small>
+    </form>
+
+    <form method="post" action="/admin/publish-to-sheet"
+          onsubmit="return confirm('This OVERWRITES the Sheet contents with the current web app state. Continue?');">
+      <button type="submit" class="contrast">Publish web app → Sheet</button>
+      <small class="muted">Run this after reviewers finish a batch of edits.</small>
+    </form>
+  </div>
+</article>
+{% endblock %}

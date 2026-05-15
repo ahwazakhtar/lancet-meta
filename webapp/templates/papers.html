@@ -24,7 +24,7 @@
   <thead>
     <tr>
       <th>Unique ID</th>
-      <th>Authors</th>
+      <th>Title</th>
       <th>Year</th>
       <th>Intervention</th>
       <th>Effect sizes</th>
@@ -36,7 +36,10 @@
     {% for p in papers %}
       <tr>
         <td><strong>{{ p.unique_id }}</strong></td>
-        <td>{{ p.authors|truncate(60) }}</td>
+        <td>
+          {{ p.title|truncate(80) }}
+          {% if p.authors %}<br><small class="muted">{{ p.authors|truncate(60) }}</small>{% endif %}
+        </td>
         <td>{{ p.year }}</td>
         <td>{{ p.intervention_category|truncate(40) }}</td>
         <td>{{ es_counts.get(p.unique_id, 0) }}</td>

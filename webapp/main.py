@@ -26,6 +26,12 @@ from sqlmodel import Session, select
 from starlette.middleware.sessions import SessionMiddleware
 
 from extraction.schema import effect_size_field_names, paper_field_names
+from extraction.sheets import (
+    EFFECT_SIZE_SHEET_COLUMNS,
+    PAPER_SHEET_COLUMNS,
+    pull_from_sheets,
+    push_to_sheets,
+)
 from extraction.storage import (
     AuditLog,
     EffectSizeRow,
@@ -33,9 +39,10 @@ from extraction.storage import (
     ReviewStatus,
     User,
     get_engine,
+    import_from_sheet_rows,
 )
 
-from .auth import authenticate, current_user_optional, current_username
+from .auth import authenticate, current_user_optional, current_username, require_admin
 
 load_dotenv()
 
@@ -424,10 +431,101 @@ def effect_flag_reextract(
     )
 
 
+# ---------------------------------------------------------------------------
+# Admin: Sheet sync
+# ---------------------------------------------------------------------------
+
+
+@app.get("/admin", response_class=HTMLResponse)
+def admin_panel(request: Request, msg: Optional[str] = None, err: Optional[str] = None):
+    require_admin(request)
+    return templates.TemplateResponse(
+        request,
+        "admin.html",
+        {
+            "msg": msg,
+            "err": err,
+            "username": request.session.get("username"),
+            "sheet_id": os.environ.get("GOOGLE_SHEET_ID", ""),
+        },
+    )
+
+
+@app.post("/admin/import-from-sheet")
+def admin_import(
+    request: Request,
+    session: Session = Depends(get_session),
+):
+    username = require_admin(request)
+    try:
+        papers, effects = pull_from_sheets()
+        n_p, n_e = import_from_sheet_rows(_engine, papers, effects, replace=True)
+    except Exception as exc:  # noqa: BLE001
+        return RedirectResponse(
+            f"/admin?err={str(exc)[:300]}", status_code=status.HTTP_303_SEE_OTHER
+        )
+    session.add(
+        AuditLog(
+            username=username,
+            action="import_sheet",
+            target="sheet",
+            payload={"papers": n_p, "effect_sizes": n_e},
+        )
+    )
+    session.commit()
+    return RedirectResponse(
+        f"/admin?msg=Imported+{n_p}+papers+and+{n_e}+effect+sizes",
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
+
+
+@app.post("/admin/publish-to-sheet")
+def admin_publish(
+    request: Request,
+    session: Session = Depends(get_session),
+):
+    username = require_admin(request)
+    try:
+        papers = list(
+            session.exec(select(PaperRow).where(PaperRow.status != ReviewStatus.deleted))
+        )
+        effects = list(
+            session.exec(select(EffectSizeRow).where(EffectSizeRow.status != ReviewStatus.deleted))
+        )
+        n_p, n_e = push_to_sheets(papers, effects)
+    except Exception as exc:  # noqa: BLE001
+        return RedirectResponse(
+            f"/admin?err={str(exc)[:300]}", status_code=status.HTTP_303_SEE_OTHER
+        )
+    session.add(
+        AuditLog(
+            username=username,
+            action="publish_sheet",
+            target="sheet",
+            payload={"papers": n_p, "effect_sizes": n_e},
+        )
+    )
+    session.commit()
+    return RedirectResponse(
+        f"/admin?msg=Published+{n_p}+papers+and+{n_e}+effect+sizes",
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Health check (Railway hits this)
+# ---------------------------------------------------------------------------
+
+
+@app.get("/health")
+def health() -> dict:
+    return {"ok": True}
+
+
 def serve() -> None:
     """Console entrypoint: `lancet-web`."""
     import uvicorn
 
-    host = os.environ.get("WEB_HOST", "127.0.0.1")
-    port = int(os.environ.get("WEB_PORT", "8000"))
+    host = os.environ.get("WEB_HOST", "0.0.0.0")
+    port = int(os.environ.get("PORT") or os.environ.get("WEB_PORT", "8000"))
     uvicorn.run("webapp.main:app", host=host, port=port, reload=False)

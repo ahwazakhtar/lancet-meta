@@ -56,6 +56,33 @@ EFFECT_SIZE_SHEET_COLUMNS = [
 
 
 def _credentials() -> Credentials:
+    # Preferred on Railway: base64-encoded JSON (immune to quoting issues
+    # in the dashboard). Generate with `base64 -w0 < key.json` on Linux or
+    # `base64 < key.json | tr -d '\n'` on macOS.
+    raw_b64 = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON_B64")
+    if raw_b64:
+        import binascii
+        import base64
+        try:
+            decoded = base64.b64decode(raw_b64, validate=True).decode("utf-8")
+        except (binascii.Error, UnicodeDecodeError) as exc:
+            raise RuntimeError(
+                "GOOGLE_SERVICE_ACCOUNT_JSON_B64 is set but is not valid base64. "
+                "Generate it from your key file with: `base64 -w0 < key.json` "
+                f"(Linux) or `base64 < key.json | tr -d '\\n'` (macOS). "
+                f"Decoder said: {exc}"
+            ) from exc
+        try:
+            info = json.loads(decoded)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                "GOOGLE_SERVICE_ACCOUNT_JSON_B64 decoded successfully but the "
+                "result isn't valid JSON. Did you base64-encode the right file? "
+                f"Parser said: {exc}"
+            ) from exc
+        return Credentials.from_service_account_info(info, scopes=SCOPES)
+
+    # Raw JSON in the env var (works if your dashboard doesn't mangle quotes).
     raw_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
     if raw_json:
         try:
@@ -63,18 +90,22 @@ def _credentials() -> Credentials:
         except json.JSONDecodeError as exc:
             raise RuntimeError(
                 "GOOGLE_SERVICE_ACCOUNT_JSON is set but does not contain valid JSON. "
-                "Re-paste the entire content of the service-account key file (a single "
-                "JSON object starting with '{' and ending with '}'). "
+                "Re-paste using Railway's RAW Editor, or switch to "
+                "GOOGLE_SERVICE_ACCOUNT_JSON_B64 (base64-encoded). "
                 f"Parser said: {exc}"
             ) from exc
         return Credentials.from_service_account_info(info, scopes=SCOPES)
+
+    # Local development: path to the JSON file.
     creds_path = os.environ.get("GOOGLE_SERVICE_ACCOUNT_FILE")
     if creds_path and Path(creds_path).exists():
         return Credentials.from_service_account_file(creds_path, scopes=SCOPES)
+
     raise RuntimeError(
-        "Google Sheets credentials are not configured. Set either "
-        "GOOGLE_SERVICE_ACCOUNT_JSON (raw JSON content, recommended on Railway) "
-        "or GOOGLE_SERVICE_ACCOUNT_FILE (path to a JSON key, recommended locally)."
+        "Google Sheets credentials are not configured. Set one of: "
+        "GOOGLE_SERVICE_ACCOUNT_JSON_B64 (base64, recommended on Railway), "
+        "GOOGLE_SERVICE_ACCOUNT_JSON (raw JSON), "
+        "or GOOGLE_SERVICE_ACCOUNT_FILE (path to a JSON key, local only)."
     )
 
 

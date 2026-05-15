@@ -42,6 +42,7 @@ class Preprocessed:
     source_pdf: Path
     n_pages: int
     n_tables: int
+    skipped: bool = False  # True when an existing MD was reused
 
 
 def sanitize_doi(doi: str) -> str:
@@ -90,13 +91,22 @@ def _table_to_markdown(table: list[list[Optional[str]]]) -> str:
     return "\n".join(out)
 
 
-def preprocess_pdf(pdf_path: Path, out_dir: Path) -> Preprocessed:
-    """PDF -> DOI-keyed markdown."""
+def preprocess_pdf(pdf_path: Path, out_dir: Path, skip_existing: bool = True) -> Preprocessed:
+    """PDF -> DOI-keyed markdown. If `skip_existing` and the target MD already
+    exists (i.e., this DOI has been preprocessed before), do nothing and
+    return a Preprocessed with skipped=True."""
     pdf_path = pdf_path.resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     doi = extract_doi(pdf_path)
     stem = sanitize_doi(doi) if doi else pdf_path.stem
     md_path = out_dir / f"{stem}.md"
+
+    if skip_existing and md_path.exists():
+        logger.info("Skipping %s (already preprocessed -> %s)", pdf_path.name, md_path.name)
+        return Preprocessed(
+            md_path=md_path, doi=doi, source_pdf=pdf_path,
+            n_pages=0, n_tables=0, skipped=True,
+        )
 
     parts: list[str] = []
     parts.append(f"# Source PDF: {pdf_path.name}")

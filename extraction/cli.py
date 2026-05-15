@@ -99,22 +99,29 @@ def preprocess(
 
     console.print(f"Preprocessing [bold]{len(pdfs)}[/bold] PDF(s) -> {out_dir}")
 
+    n_skipped = n_done = n_fail = 0
     with Progress(SpinnerColumn(), TextColumn("{task.description}"), TimeElapsedColumn(), console=console) as prog:
         task = prog.add_task("Preprocessing", total=len(pdfs))
         for p in pdfs:
             try:
-                result = preprocess_pdf(p, out_dir)
+                result = preprocess_pdf(p, out_dir, skip_existing=skip_existing)
             except Exception as exc:  # noqa: BLE001
                 prog.console.log(f"[red]FAIL[/red] {p.name}: {exc}")
+                n_fail += 1
                 prog.advance(task)
                 continue
             doi_repr = result.doi or "(no DOI)"
-            note = "" if not skip_existing else ""
-            prog.console.log(
-                f"[green]OK[/green] {p.name} -> {result.md_path.name} "
-                f"(doi={doi_repr}, pages={result.n_pages}, tables={result.n_tables})"
-            )
+            if result.skipped:
+                prog.console.log(f"[dim]skip[/dim] {p.name} (already done -> {result.md_path.name})")
+                n_skipped += 1
+            else:
+                prog.console.log(
+                    f"[green]OK[/green] {p.name} -> {result.md_path.name} "
+                    f"(doi={doi_repr}, pages={result.n_pages}, tables={result.n_tables})"
+                )
+                n_done += 1
             prog.advance(task)
+    console.print(f"[bold]Done.[/bold] preprocessed={n_done}, skipped={n_skipped}, failed={n_fail}")
 
 
 # ---------------------------------------------------------------------------
@@ -128,6 +135,11 @@ def extract(
     skip_existing: bool = typer.Option(True, help="Skip markdowns already in the JSON cache."),
     limit: Optional[int] = typer.Option(None, help="Process at most N files."),
     require_doi: bool = typer.Option(False, help="Skip papers with no DOI match in the xlsx."),
+    publish: bool = typer.Option(
+        False,
+        "--publish/--no-publish",
+        help="After successful extraction, push the SQLite contents to the Google Sheet.",
+    ),
 ) -> None:
     """Run Claude over each preprocessed markdown to produce structured data."""
     engine = get_engine(_db_path())
@@ -178,6 +190,10 @@ def extract(
             )
             prog.advance(task)
 
+    if publish:
+        console.print("Publishing to Google Sheet...")
+        _do_publish(engine)
+
 
 def _doi_from_md(md_path: Path) -> Optional[str]:
     """Read the DOI line from a preprocessed markdown file (we wrote it at the top)."""
@@ -213,10 +229,7 @@ def reload_cache() -> None:
     console.print("[green]Done[/green]")
 
 
-@app.command()
-def publish() -> None:
-    """Push the local SQLite contents to Google Sheets (overwrites the two tabs)."""
-    engine = get_engine(_db_path())
+def _do_publish(engine) -> tuple[int, int]:
     with Session(engine) as session:
         papers = list(
             session.exec(select(PaperRow).where(PaperRow.status != ReviewStatus.deleted))
@@ -226,6 +239,13 @@ def publish() -> None:
         )
     n_p, n_e = push_to_sheets(papers, effects)
     console.print(f"[green]Published[/green] {n_p} papers and {n_e} effect sizes.")
+    return n_p, n_e
+
+
+@app.command()
+def publish() -> None:
+    """Push the local SQLite contents to Google Sheets (overwrites the two tabs)."""
+    _do_publish(get_engine(_db_path()))
 
 
 # ---------------------------------------------------------------------------

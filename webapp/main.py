@@ -139,6 +139,8 @@ def index(
     q: Optional[str] = None,
     status_filter: Optional[str] = None,
     checkout_filter: Optional[str] = None,
+    msg: Optional[str] = None,
+    err: Optional[str] = None,
     session: Session = Depends(get_session),
 ):
     me = current_email_optional(request)
@@ -187,6 +189,8 @@ def index(
             "statuses": [s.value for s in ReviewStatus],
             "display_name": request.session.get("display_name"),
             "me": me,
+            "msg": msg,
+            "err": err,
         },
     )
 
@@ -650,12 +654,18 @@ def admin_delete_user(
     )
 
 
-@app.post("/admin/import-from-sheet")
-def admin_import(
+@app.post("/refresh-from-sheet")
+def refresh_from_sheet(
     request: Request,
+    next: Optional[str] = Form(None),
     session: Session = Depends(get_session),
 ):
-    actor = require_admin(request)
+    """Pull the Sheet and replace all UNLOCKED papers in the local DB.
+
+    Available to any signed-in reviewer (read direction). Papers currently
+    checked out by anyone are skipped to preserve their work.
+    """
+    actor = current_email(request)
     try:
         papers, effects = pull_from_sheets()
         n_p, n_e, skipped = import_from_sheet_rows(
@@ -663,18 +673,20 @@ def admin_import(
         )
     except Exception as exc:  # noqa: BLE001
         return RedirectResponse(
-            f"/admin?err={str(exc)[:300]}", status_code=status.HTTP_303_SEE_OTHER
+            f"/?err={str(exc)[:300]}", status_code=status.HTTP_303_SEE_OTHER
         )
     _log(
-        session, actor, "import_sheet", "sheet",
+        session, actor, "refresh_sheet", "sheet",
         {"papers": n_p, "effect_sizes": n_e, "skipped": skipped},
     )
     session.commit()
-    note = f"Imported+{n_p}+papers+and+{n_e}+effect+sizes"
+    note = f"Refreshed+{n_p}+papers+and+{n_e}+effect+sizes+from+Sheet"
     if skipped:
         note += f".+Skipped+{len(skipped)}+checked-out+paper(s)"
+    target = next or "/"
+    sep = "&" if "?" in target else "?"
     return RedirectResponse(
-        f"/admin?msg={note}",
+        f"{target}{sep}msg={note}",
         status_code=status.HTTP_303_SEE_OTHER,
     )
 

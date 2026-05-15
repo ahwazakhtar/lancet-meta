@@ -72,19 +72,19 @@
   </p>
 
   <div class="grid">
-    <form method="post" action="/admin/import-from-sheet"
-          onsubmit="return confirm('This REPLACES every paper and effect size with what is in the Sheet, except papers currently checked out by a reviewer. Continue?');">
-      <button type="submit">Bulk import from Sheet</button>
+    <form method="post" action="/refresh-from-sheet"
+          onsubmit="return confirm('Refresh from Sheet? Replaces every paper EXCEPT ones currently checked out.');">
+      <input type="hidden" name="next" value="/admin">
+      <button type="submit">↻ Refresh from Sheet</button>
       <small class="muted">
-        Replaces all <em>unlocked</em> papers from the Sheet. Reviewers usually
-        refresh their own paper from its detail page after checking it out.
+        Any reviewer can also do this from the dashboard. Skips checked-out papers.
       </small>
     </form>
 
     <form method="post" action="/admin/publish-to-sheet"
           onsubmit="return confirm('This OVERWRITES the Sheet contents with the current web-app state. Continue?');">
       <button type="submit" class="contrast">Publish web app → Sheet</button>
-      <small class="muted">Run after reviewers finish a batch of edits.</small>
+      <small class="muted">Admin only. Run after reviewers finish a batch of edits.</small>
     </form>
   </div>
 </article>

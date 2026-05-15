@@ -1,10 +1,20 @@
 {% extends "base.html" %}
 {% block title %}Papers · Lancet Meta Review{% endblock %}
 {% block content %}
-<hgroup>
-  <h2>Papers</h2>
-  <p>{{ papers|length }} paper(s) visible. Check a paper out before editing it.</p>
-</hgroup>
+
+{% if msg %}<p class="msg-success">{{ msg }}</p>{% endif %}
+{% if err %}<p class="msg-error">{{ err }}</p>{% endif %}
+
+<div class="flex-row" style="align-items:flex-end;">
+  <hgroup>
+    <h2>Papers</h2>
+    <p>{{ papers|length }} paper(s) visible. Check a paper out before editing it.</p>
+  </hgroup>
+  <form method="post" action="/refresh-from-sheet" style="margin:0;"
+        onsubmit="return confirm('Refresh papers from the Google Sheet?\n\nThis replaces every paper EXCEPT any that someone has checked out.');">
+    <button type="submit" class="outline">↻ Refresh from Sheet</button>
+  </form>
+</div>
 
 <form method="get" action="/" role="search">
   <div class="grid">

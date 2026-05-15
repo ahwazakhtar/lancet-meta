@@ -91,20 +91,27 @@ mkdir -p pdfs
 
 ```bash
 # 1. Preprocess every PDF -> data/preprocessed/<sanitized-doi>.md
+#    Already-processed PDFs (matching DOI) are skipped automatically.
 python -m extraction preprocess
 
 # 2. Run Claude over each markdown -> SQLite + JSON cache
-#    Skip papers without a DOI match in the xlsx with --require-doi.
-python -m extraction extract
+#    Add --publish to push to the Sheet in the same step.
+python -m extraction extract --publish
 
-# 3. Push the SQLite contents to the Google Sheet
+# Or push separately afterwards:
 python -m extraction publish
 
 # Other useful commands
-python -m extraction status                  # progress summary
-python -m extraction extract --limit 3       # try a few PDFs first
-python -m extraction reload-cache            # rebuild SQLite from cached JSON
+python -m extraction status                       # progress summary
+python -m extraction preprocess --no-skip-existing  # force re-preprocess
+python -m extraction extract --limit 3            # try a few PDFs first
+python -m extraction reload-cache                 # rebuild SQLite from cached JSON
 ```
+
+**Sheet update flow:** local preprocessing **never** touches the Sheet on
+its own. The Sheet only changes when you run `publish` (or `extract
+--publish`). After that, reviewers on Railway can click **↻ Refresh from
+Sheet** on the dashboard to pull your new extractions into the review UI.
 
 Notes:
 - **DOIs are required for xlsx matching** — papers without a discoverable DOI
@@ -171,17 +178,18 @@ via `railway run` if you prefer a CLI.)
 - Reviewers visit the domain and sign in (email only).
 - The dashboard shows every paper with its checkout state. Anyone who's
   currently working on a paper appears next to it (`you` or their email).
+- **↻ Refresh from Sheet** on the dashboard pulls the latest Sheet contents
+  into the web app. Any reviewer can hit it. Papers currently checked out
+  are skipped so in-progress work isn't trashed.
 - A reviewer picks an available paper, clicks **Review**, then **Check
   out** — that locks the paper to them. Only they (and admins) can edit it
   until they **Check in**.
-- A held-by-me paper has an extra button: **Import this paper from Sheet**.
-  That refreshes just that paper's fields and effect sizes from the latest
-  Sheet contents — useful after the local pipeline re-extracts that PDF.
-- Admins can **bulk import** from the Sheet via `/admin`. The bulk import
-  always skips papers that someone has checked out, so in-progress work
-  isn't trashed.
+- A held-by-me paper has an extra button: **Import this paper from Sheet**,
+  which refreshes just that paper's fields and effect sizes from the latest
+  Sheet contents.
 - When reviewers finish a batch of edits, an admin clicks **Publish web app
-  → Sheet** to overwrite the Sheet with the current state.
+  → Sheet** to overwrite the Sheet with the current state. (Publish is
+  admin-only; refresh is everyone.)
 
 ### Notes / caveats
 

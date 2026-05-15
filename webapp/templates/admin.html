@@ -73,9 +73,12 @@
 
   <div class="grid">
     <form method="post" action="/admin/import-from-sheet"
-          onsubmit="return confirm('This REPLACES every paper and effect size with what is in the Sheet. Continue?');">
-      <button type="submit">Import from Sheet → web app</button>
-      <small class="muted">Run after a local extraction + publish.</small>
+          onsubmit="return confirm('This REPLACES every paper and effect size with what is in the Sheet, except papers currently checked out by a reviewer. Continue?');">
+      <button type="submit">Bulk import from Sheet</button>
+      <small class="muted">
+        Replaces all <em>unlocked</em> papers from the Sheet. Reviewers usually
+        refresh their own paper from its detail page after checking it out.
+      </small>
     </form>
 
     <form method="post" action="/admin/publish-to-sheet"

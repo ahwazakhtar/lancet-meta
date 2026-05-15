@@ -3,17 +3,23 @@
 {% block content %}
 <hgroup>
   <h2>Papers</h2>
-  <p>{{ papers|length }} paper(s) in the extraction queue.</p>
+  <p>{{ papers|length }} paper(s) visible. Check a paper out before editing it.</p>
 </hgroup>
 
 <form method="get" action="/" role="search">
   <div class="grid">
-    <input type="search" name="q" value="{{ q }}" placeholder="Search by unique ID, authors, intervention…">
+    <input type="search" name="q" value="{{ q }}" placeholder="Search by unique ID, authors, intervention, title…">
     <select name="status_filter">
       <option value="">All statuses</option>
       {% for s in statuses %}
         <option value="{{ s }}" {% if status_filter == s %}selected{% endif %}>{{ s }}</option>
       {% endfor %}
+    </select>
+    <select name="checkout_filter">
+      <option value="">Any checkout state</option>
+      <option value="mine" {% if checkout_filter == 'mine' %}selected{% endif %}>Checked out by me</option>
+      <option value="held" {% if checkout_filter == 'held' %}selected{% endif %}>Checked out (anyone)</option>
+      <option value="available" {% if checkout_filter == 'available' %}selected{% endif %}>Available</option>
     </select>
     <button type="submit">Filter</button>
   </div>
@@ -28,6 +34,7 @@
       <th>Year</th>
       <th>Intervention</th>
       <th>Effect sizes</th>
+      <th>Checked out</th>
       <th>Status</th>
       <th></th>
     </tr>
@@ -43,6 +50,17 @@
         <td>{{ p.year }}</td>
         <td>{{ p.intervention_category|truncate(40) }}</td>
         <td>{{ es_counts.get(p.unique_id, 0) }}</td>
+        <td>
+          {% if p.checked_out_by %}
+            {% if p.checked_out_by == me %}
+              <span class="badge badge-mine" title="Checked out at {{ p.checked_out_at }}">you</span>
+            {% else %}
+              <span class="badge badge-held" title="Checked out at {{ p.checked_out_at }}">{{ p.checked_out_by }}</span>
+            {% endif %}
+          {% else %}
+            <span class="muted">—</span>
+          {% endif %}
+        </td>
         <td>
           <span class="badge badge-{{ p.status.value }}">{{ p.status.value }}</span>
           {% if p.needs_reextraction %}<span class="badge badge-reextract">re-extract</span>{% endif %}

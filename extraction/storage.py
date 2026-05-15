@@ -76,6 +76,11 @@ class PaperRow(SQLModel, table=True):
     extracted_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
+    # Soft lock: while non-null, only this email may edit the paper or its
+    # effect sizes (admins can force-release). Setting these is "checking out".
+    checked_out_by: Optional[str] = Field(default=None, index=True)
+    checked_out_at: Optional[datetime] = None
+
 
 class EffectSizeRow(SQLModel, table=True):
     __tablename__ = "effect_sizes"
@@ -144,11 +149,27 @@ class AuditLog(SQLModel, table=True):
     payload: dict = Field(default_factory=dict, sa_column=Column(JSON))
 
 
+def _ensure_columns(engine, table: str, columns: dict[str, str]) -> None:
+    """Add missing columns to a table (SQLite-only lightweight migration)."""
+    from sqlalchemy import text
+
+    with engine.begin() as conn:
+        existing = {row[1] for row in conn.exec_driver_sql(f"PRAGMA table_info({table})").fetchall()}
+        for col, sql_type in columns.items():
+            if col not in existing:
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {sql_type}"))
+
+
 def get_engine(db_path: str | Path):
     db_path = Path(db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
     engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
     SQLModel.metadata.create_all(engine)
+    # Schema additions for existing DBs that pre-date the new columns.
+    _ensure_columns(engine, "papers", {
+        "checked_out_by": "TEXT",
+        "checked_out_at": "DATETIME",
+    })
     return engine
 
 
@@ -224,40 +245,74 @@ def _coerce_bool(value) -> bool:
     return str(value).strip().lower() in {"true", "1", "yes", "y"}
 
 
+_NEVER_OVERWRITE = {"id", "checked_out_by", "checked_out_at"}
+
+
+def _paper_kwargs_from_row(row: dict) -> dict:
+    cols = {c.name for c in PaperRow.__table__.columns} - _NEVER_OVERWRITE
+    out = {k: row[k] for k in cols if k in row}
+    out["status"] = _coerce_status(row.get("status", "pending"))
+    out["needs_reextraction"] = _coerce_bool(row.get("needs_reextraction"))
+    return out
+
+
+def _effect_kwargs_from_row(row: dict) -> dict:
+    cols = {c.name for c in EffectSizeRow.__table__.columns} - {"id"}
+    out = {k: row[k] for k in cols if k in row}
+    out["status"] = _coerce_status(row.get("status", "pending"))
+    out["needs_reextraction"] = _coerce_bool(row.get("needs_reextraction"))
+    return out
+
+
 def import_from_sheet_rows(
     engine,
     paper_rows: list[dict],
     effect_rows: list[dict],
     replace: bool = True,
-) -> tuple[int, int]:
-    """Bulk-load rows fetched from Google Sheets into the local SQLite DB.
+    preserve_checked_out: bool = True,
+) -> tuple[int, int, list[str]]:
+    """Bulk-load rows from Google Sheets into the local SQLite DB.
 
-    By default (replace=True) the DB is wiped before inserting so the local
-    state matches the Sheet exactly. Pass replace=False to upsert.
+    With replace=True, the DB is wiped first so it mirrors the Sheet.
+    With preserve_checked_out=True, papers currently checked out (and their
+    effect sizes) are kept as-is and skipped in the inbound rows, so a
+    reviewer's in-progress work isn't trashed by a bulk refresh.
+
+    Returns (papers_imported, effects_imported, skipped_unique_ids).
     """
-    paper_cols = {c.name for c in PaperRow.__table__.columns} - {"id"}
-    effect_cols = {c.name for c in EffectSizeRow.__table__.columns} - {"id"}
-
     with Session(engine) as session:
+        held_ids: set[str] = set()
+        if preserve_checked_out:
+            held_ids = {
+                p.unique_id
+                for p in session.exec(
+                    select(PaperRow).where(PaperRow.checked_out_by.is_not(None))
+                )
+            }
+
         if replace:
-            for r in session.exec(select(EffectSizeRow)).all():
+            # Delete only the rows we are allowed to replace.
+            for r in session.exec(
+                select(EffectSizeRow).where(EffectSizeRow.paper_unique_id.not_in(held_ids))
+                if held_ids
+                else select(EffectSizeRow)
+            ).all():
                 session.delete(r)
-            for r in session.exec(select(PaperRow)).all():
+            for r in session.exec(
+                select(PaperRow).where(PaperRow.unique_id.not_in(held_ids))
+                if held_ids
+                else select(PaperRow)
+            ).all():
                 session.delete(r)
             session.flush()
 
         n_p = 0
         for row in paper_rows:
             unique_id = (row.get("unique_id") or "").strip()
-            if not unique_id:
+            if not unique_id or unique_id in held_ids:
                 continue
-            kwargs = {}
-            for k in paper_cols:
-                if k in row:
-                    kwargs[k] = row[k]
+            kwargs = _paper_kwargs_from_row(row)
             kwargs["unique_id"] = unique_id
-            kwargs["status"] = _coerce_status(row.get("status", "pending"))
-            kwargs["needs_reextraction"] = _coerce_bool(row.get("needs_reextraction"))
             existing = session.exec(
                 select(PaperRow).where(PaperRow.unique_id == unique_id)
             ).first()
@@ -272,17 +327,63 @@ def import_from_sheet_rows(
         n_e = 0
         for row in effect_rows:
             paper_uid = (row.get("paper_unique_id") or "").strip()
-            if not paper_uid:
+            if not paper_uid or paper_uid in held_ids:
                 continue
-            kwargs = {}
-            for k in effect_cols:
-                if k in row:
-                    kwargs[k] = row[k]
+            kwargs = _effect_kwargs_from_row(row)
             kwargs["paper_unique_id"] = paper_uid
-            kwargs["status"] = _coerce_status(row.get("status", "pending"))
-            kwargs["needs_reextraction"] = _coerce_bool(row.get("needs_reextraction"))
             session.add(EffectSizeRow(**kwargs))
             n_e += 1
 
         session.commit()
-    return n_p, n_e
+    return n_p, n_e, sorted(held_ids)
+
+
+def import_paper_from_sheet(
+    engine,
+    unique_id: str,
+    paper_rows: list[dict],
+    effect_rows: list[dict],
+) -> tuple[bool, int]:
+    """Refresh one paper from the Sheet. Preserves the checkout state.
+
+    Returns (paper_found_in_sheet, n_effect_sizes_imported).
+    """
+    match = next((p for p in paper_rows if (p.get("unique_id") or "").strip() == unique_id), None)
+    if not match:
+        return False, 0
+    matching_effects = [
+        e for e in effect_rows if (e.get("paper_unique_id") or "").strip() == unique_id
+    ]
+
+    with Session(engine) as session:
+        existing = session.exec(select(PaperRow).where(PaperRow.unique_id == unique_id)).first()
+        held_by = existing.checked_out_by if existing else None
+        held_at = existing.checked_out_at if existing else None
+
+        kwargs = _paper_kwargs_from_row(match)
+        kwargs["unique_id"] = unique_id
+        if existing:
+            for k, v in kwargs.items():
+                setattr(existing, k, v)
+            # Preserve checkout
+            existing.checked_out_by = held_by
+            existing.checked_out_at = held_at
+            session.add(existing)
+        else:
+            session.add(PaperRow(**kwargs))
+
+        # Replace this paper's effect sizes wholesale.
+        for r in session.exec(
+            select(EffectSizeRow).where(EffectSizeRow.paper_unique_id == unique_id)
+        ).all():
+            session.delete(r)
+
+        n_e = 0
+        for row in matching_effects:
+            es_kwargs = _effect_kwargs_from_row(row)
+            es_kwargs["paper_unique_id"] = unique_id
+            session.add(EffectSizeRow(**es_kwargs))
+            n_e += 1
+
+        session.commit()
+    return True, n_e

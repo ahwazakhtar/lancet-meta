@@ -168,12 +168,20 @@ via `railway run` if you prefer a CLI.)
 
 ### 6. Usage on the deployed app
 
-- Reviewers visit the domain, sign in, see the list of papers.
-- After you run a local `preprocess` → `extract` → `publish`, log in as an
-  **admin**, go to `/admin`, and click **Import from Sheet → web app**. The
-  new papers (and any updates to existing ones) appear in the review UI.
+- Reviewers visit the domain and sign in (email only).
+- The dashboard shows every paper with its checkout state. Anyone who's
+  currently working on a paper appears next to it (`you` or their email).
+- A reviewer picks an available paper, clicks **Review**, then **Check
+  out** — that locks the paper to them. Only they (and admins) can edit it
+  until they **Check in**.
+- A held-by-me paper has an extra button: **Import this paper from Sheet**.
+  That refreshes just that paper's fields and effect sizes from the latest
+  Sheet contents — useful after the local pipeline re-extracts that PDF.
+- Admins can **bulk import** from the Sheet via `/admin`. The bulk import
+  always skips papers that someone has checked out, so in-progress work
+  isn't trashed.
 - When reviewers finish a batch of edits, an admin clicks **Publish web app
-  → Sheet** to overwrite the Sheet with the current edited state.
+  → Sheet** to overwrite the Sheet with the current state.
 
 ### Notes / caveats
 

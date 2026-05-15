@@ -9,6 +9,9 @@
   </ul>
 </nav>
 
+{% if msg %}<p class="msg-success">{{ msg }}</p>{% endif %}
+{% if err %}<p class="msg-error">{{ err }}</p>{% endif %}
+
 <article>
   <header>
     <div class="flex-row">
@@ -26,42 +29,83 @@
           {% endif %}
         </p>
       </hgroup>
-      <div class="row-actions">
-        <form method="post" action="/papers/{{ paper.unique_id }}/confirm" style="display:inline">
-          <button type="submit">Confirm paper</button>
-        </form>
-        <form method="post" action="/papers/{{ paper.unique_id }}/delete" style="display:inline" onsubmit="return confirm('Delete this paper extraction?');">
-          <button type="submit" class="secondary outline">Delete</button>
-        </form>
-      </div>
     </div>
   </header>
+
+  {# ---- Checkout banner ---- #}
+  <div class="checkout-banner checkout-{% if held_by_me %}mine{% elif paper.checked_out_by %}held{% else %}available{% endif %}">
+    {% if held_by_me %}
+      <div>
+        <strong>You have this paper checked out.</strong>
+        <small class="muted">since {{ paper.checked_out_at.strftime("%Y-%m-%d %H:%M UTC") }}. You can edit, refresh from the Sheet, then check it back in when done.</small>
+      </div>
+      <div class="row-actions">
+        <form method="post" action="/papers/{{ paper.unique_id }}/import-from-sheet" style="display:inline"
+              onsubmit="return confirm('Replace this paper\\'s extracted fields and effect sizes with the latest from the Sheet?');">
+          <button type="submit" class="outline">Import this paper from Sheet</button>
+        </form>
+        <form method="post" action="/papers/{{ paper.unique_id }}/checkin" style="display:inline">
+          <button type="submit">Check in</button>
+        </form>
+      </div>
+    {% elif paper.checked_out_by %}
+      <div>
+        <strong>Checked out by {{ paper.checked_out_by }}</strong>
+        <small class="muted">since {{ paper.checked_out_at.strftime("%Y-%m-%d %H:%M UTC") }}. Editing is locked while another reviewer is working on this paper.</small>
+      </div>
+      {% if is_admin %}
+        <div class="row-actions">
+          <form method="post" action="/papers/{{ paper.unique_id }}/checkin" style="display:inline"
+                onsubmit="return confirm('Force-release this checkout? The current holder will lose their lock.');">
+            <button type="submit" class="secondary outline">Force release (admin)</button>
+          </form>
+        </div>
+      {% endif %}
+    {% else %}
+      <div>
+        <strong>Available.</strong>
+        <small class="muted">Check this paper out to start editing.</small>
+      </div>
+      <div class="row-actions">
+        <form method="post" action="/papers/{{ paper.unique_id }}/checkout" style="display:inline">
+          <button type="submit">Check out</button>
+        </form>
+      </div>
+    {% endif %}
+  </div>
 
   <details open>
     <summary><strong>Paper-level fields</strong></summary>
     <form method="post" action="/papers/{{ paper.unique_id }}/edit">
-      <div class="field-grid">
-        {% for field in paper_fields %}
-          <label>
-            <span class="field-label">{{ field.replace("_", " ") }}</span>
-            {% set val = paper[field] %}
-            {% if val and val|length > 80 %}
-              <textarea name="{{ field }}" rows="3">{{ val }}</textarea>
-            {% else %}
-              <input type="text" name="{{ field }}" value="{{ val or '' }}">
-            {% endif %}
-          </label>
-        {% endfor %}
-      </div>
-      <label>
-        <span class="field-label">Reviewer notes (paper)</span>
-        <textarea name="reviewer_notes" rows="2">{{ paper.reviewer_notes }}</textarea>
-      </label>
-      <label>
-        <input type="checkbox" name="needs_reextraction" {% if paper.needs_reextraction %}checked{% endif %}>
-        Flag this paper for re-extraction
-      </label>
-      <button type="submit">Save paper edits</button>
+      <fieldset {% if not can_edit %}disabled{% endif %}>
+        <div class="field-grid">
+          {% for field in paper_fields %}
+            <label>
+              <span class="field-label">{{ field.replace("_", " ") }}</span>
+              {% set val = paper[field] %}
+              {% if val and val|length > 80 %}
+                <textarea name="{{ field }}" rows="3">{{ val }}</textarea>
+              {% else %}
+                <input type="text" name="{{ field }}" value="{{ val or '' }}">
+              {% endif %}
+            </label>
+          {% endfor %}
+        </div>
+        <label>
+          <span class="field-label">Reviewer notes (paper)</span>
+          <textarea name="reviewer_notes" rows="2">{{ paper.reviewer_notes }}</textarea>
+        </label>
+        <label>
+          <input type="checkbox" name="needs_reextraction" {% if paper.needs_reextraction %}checked{% endif %}>
+          Flag this paper for re-extraction
+        </label>
+        <div class="row-actions">
+          <button type="submit">Save paper edits</button>
+          <button type="submit" formaction="/papers/{{ paper.unique_id }}/confirm" class="contrast">Confirm paper</button>
+          <button type="submit" formaction="/papers/{{ paper.unique_id }}/delete" class="secondary outline"
+                  onclick="return confirm('Delete this paper extraction?');">Delete</button>
+        </div>
+      </fieldset>
     </form>
   </details>
 </article>
@@ -87,33 +131,35 @@
       </header>
 
       <form method="post" action="/effect-sizes/{{ es.id }}/edit">
-        <div class="field-grid">
-          {% for field in effect_fields %}
-            <label>
-              <span class="field-label">{{ field.replace("_", " ") }}</span>
-              {% set val = es[field] %}
-              {% if val and val|length > 80 %}
-                <textarea name="{{ field }}" rows="2">{{ val }}</textarea>
-              {% else %}
-                <input type="text" name="{{ field }}" value="{{ val or '' }}">
-              {% endif %}
-            </label>
-          {% endfor %}
-        </div>
-        <label>
-          <span class="field-label">Reviewer notes</span>
-          <textarea name="reviewer_notes" rows="2">{{ es.reviewer_notes }}</textarea>
-        </label>
-        <label>
-          <input type="checkbox" name="needs_reextraction" {% if es.needs_reextraction %}checked{% endif %}>
-          Needs re-extraction
-        </label>
-        <div class="row-actions">
-          <button type="submit">Save edits</button>
-          <button type="submit" formaction="/effect-sizes/{{ es.id }}/confirm" class="contrast">Confirm</button>
-          <button type="submit" formaction="/effect-sizes/{{ es.id }}/delete" class="secondary outline"
-                  onclick="return confirm('Delete this effect size?');">Delete</button>
-        </div>
+        <fieldset {% if not can_edit %}disabled{% endif %}>
+          <div class="field-grid">
+            {% for field in effect_fields %}
+              <label>
+                <span class="field-label">{{ field.replace("_", " ") }}</span>
+                {% set val = es[field] %}
+                {% if val and val|length > 80 %}
+                  <textarea name="{{ field }}" rows="2">{{ val }}</textarea>
+                {% else %}
+                  <input type="text" name="{{ field }}" value="{{ val or '' }}">
+                {% endif %}
+              </label>
+            {% endfor %}
+          </div>
+          <label>
+            <span class="field-label">Reviewer notes</span>
+            <textarea name="reviewer_notes" rows="2">{{ es.reviewer_notes }}</textarea>
+          </label>
+          <label>
+            <input type="checkbox" name="needs_reextraction" {% if es.needs_reextraction %}checked{% endif %}>
+            Needs re-extraction
+          </label>
+          <div class="row-actions">
+            <button type="submit">Save edits</button>
+            <button type="submit" formaction="/effect-sizes/{{ es.id }}/confirm" class="contrast">Confirm</button>
+            <button type="submit" formaction="/effect-sizes/{{ es.id }}/delete" class="secondary outline"
+                    onclick="return confirm('Delete this effect size?');">Delete</button>
+          </div>
+        </fieldset>
       </form>
     </article>
   {% endfor %}
@@ -121,15 +167,17 @@
   <details>
     <summary><strong>Add a new effect size</strong></summary>
     <form method="post" action="/papers/{{ paper.unique_id }}/effect-sizes/new">
-      <div class="field-grid">
-        {% for field in effect_fields %}
-          <label>
-            <span class="field-label">{{ field.replace("_", " ") }}</span>
-            <input type="text" name="{{ field }}">
-          </label>
-        {% endfor %}
-      </div>
-      <button type="submit">Add effect size</button>
+      <fieldset {% if not can_edit %}disabled{% endif %}>
+        <div class="field-grid">
+          {% for field in effect_fields %}
+            <label>
+              <span class="field-label">{{ field.replace("_", " ") }}</span>
+              <input type="text" name="{{ field }}">
+            </label>
+          {% endfor %}
+        </div>
+        <button type="submit">Add effect size</button>
+      </fieldset>
     </form>
   </details>
 </section>

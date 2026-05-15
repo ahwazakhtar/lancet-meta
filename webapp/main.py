@@ -38,6 +38,7 @@ from extraction.storage import (
     User,
     get_engine,
     import_from_sheet_rows,
+    import_paper_from_sheet,
 )
 
 from .auth import authenticate, current_email, current_email_optional, require_admin
@@ -73,6 +74,23 @@ def _editable_paper_fields() -> list[str]:
 
 def _editable_effect_fields() -> list[str]:
     return effect_size_field_names()
+
+
+def _is_admin(request: Request) -> bool:
+    return bool(request.session.get("is_admin"))
+
+
+def _require_checkout(request: Request, paper: PaperRow) -> None:
+    """Block edits unless the paper is checked out by the caller (admins bypass)."""
+    email = current_email(request)
+    if _is_admin(request):
+        return
+    if paper.checked_out_by != email:
+        holder = paper.checked_out_by or "nobody"
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Check out this paper before editing. Currently held by: {holder}.",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -120,9 +138,11 @@ def index(
     request: Request,
     q: Optional[str] = None,
     status_filter: Optional[str] = None,
+    checkout_filter: Optional[str] = None,
     session: Session = Depends(get_session),
 ):
-    if not current_email_optional(request):
+    me = current_email_optional(request)
+    if not me:
         return RedirectResponse("/login", status_code=status.HTTP_303_SEE_OTHER)
 
     stmt = select(PaperRow).where(PaperRow.status != ReviewStatus.deleted)
@@ -131,6 +151,13 @@ def index(
             stmt = stmt.where(PaperRow.status == ReviewStatus(status_filter))
         except ValueError:
             pass
+    if checkout_filter == "mine":
+        stmt = stmt.where(PaperRow.checked_out_by == me)
+    elif checkout_filter == "held":
+        stmt = stmt.where(PaperRow.checked_out_by.is_not(None))
+    elif checkout_filter == "available":
+        stmt = stmt.where(PaperRow.checked_out_by.is_(None))
+
     papers = list(session.exec(stmt.order_by(PaperRow.unique_id)))
     if q:
         ql = q.lower()
@@ -156,8 +183,10 @@ def index(
             "es_counts": es_counts,
             "q": q or "",
             "status_filter": status_filter or "",
+            "checkout_filter": checkout_filter or "",
             "statuses": [s.value for s in ReviewStatus],
             "display_name": request.session.get("display_name"),
+            "me": me,
         },
     )
 
@@ -171,9 +200,11 @@ def index(
 def paper_detail(
     request: Request,
     unique_id: str,
+    msg: Optional[str] = None,
+    err: Optional[str] = None,
     session: Session = Depends(get_session),
 ):
-    current_email(request)
+    me = current_email(request)
     paper = session.exec(select(PaperRow).where(PaperRow.unique_id == unique_id)).first()
     if not paper:
         raise HTTPException(404)
@@ -185,6 +216,8 @@ def paper_detail(
             .order_by(EffectSizeRow.id)
         )
     )
+    held_by_me = paper.checked_out_by == me
+    can_edit = held_by_me or _is_admin(request)
     return templates.TemplateResponse(
         request,
         "paper_detail.html",
@@ -195,7 +228,98 @@ def paper_detail(
             "effect_fields": _editable_effect_fields(),
             "statuses": [s.value for s in ReviewStatus],
             "display_name": request.session.get("display_name"),
+            "me": me,
+            "held_by_me": held_by_me,
+            "can_edit": can_edit,
+            "is_admin": _is_admin(request),
+            "msg": msg,
+            "err": err,
         },
+    )
+
+
+# ---------------------------------------------------------------------------
+# Paper checkout / check-in / per-paper import
+# ---------------------------------------------------------------------------
+
+
+@app.post("/papers/{unique_id}/checkout")
+def paper_checkout(
+    request: Request,
+    unique_id: str,
+    session: Session = Depends(get_session),
+):
+    email = current_email(request)
+    paper = session.exec(select(PaperRow).where(PaperRow.unique_id == unique_id)).first()
+    if not paper:
+        raise HTTPException(404)
+    if paper.checked_out_by and paper.checked_out_by != email:
+        return RedirectResponse(
+            f"/papers/{unique_id}?err=Already+checked+out+by+{paper.checked_out_by}",
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+    paper.checked_out_by = email
+    paper.checked_out_at = datetime.utcnow()
+    _log(session, email, "checkout", f"paper:{paper.id}")
+    session.add(paper)
+    session.commit()
+    return RedirectResponse(f"/papers/{unique_id}", status_code=status.HTTP_303_SEE_OTHER)
+
+
+@app.post("/papers/{unique_id}/checkin")
+def paper_checkin(
+    request: Request,
+    unique_id: str,
+    session: Session = Depends(get_session),
+):
+    email = current_email(request)
+    paper = session.exec(select(PaperRow).where(PaperRow.unique_id == unique_id)).first()
+    if not paper:
+        raise HTTPException(404)
+    if paper.checked_out_by != email and not _is_admin(request):
+        raise HTTPException(403, "Only the holder or an admin can check this in.")
+    was_held_by = paper.checked_out_by
+    paper.checked_out_by = None
+    paper.checked_out_at = None
+    _log(session, email, "checkin", f"paper:{paper.id}", {"was_held_by": was_held_by})
+    session.add(paper)
+    session.commit()
+    return RedirectResponse(f"/papers/{unique_id}", status_code=status.HTTP_303_SEE_OTHER)
+
+
+@app.post("/papers/{unique_id}/import-from-sheet")
+def paper_import_one(
+    request: Request,
+    unique_id: str,
+    session: Session = Depends(get_session),
+):
+    email = current_email(request)
+    paper = session.exec(select(PaperRow).where(PaperRow.unique_id == unique_id)).first()
+    if not paper:
+        raise HTTPException(404)
+    if paper.checked_out_by != email:
+        return RedirectResponse(
+            f"/papers/{unique_id}?err=Check+out+this+paper+before+importing",
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+    try:
+        papers, effects = pull_from_sheets()
+    except Exception as exc:  # noqa: BLE001
+        return RedirectResponse(
+            f"/papers/{unique_id}?err={str(exc)[:200]}",
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+    found, n_e = import_paper_from_sheet(_engine, unique_id, papers, effects)
+    if not found:
+        return RedirectResponse(
+            f"/papers/{unique_id}?err=Paper+not+found+in+Sheet",
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+    _log(session, email, "import_paper", f"paper:{paper.id}", {"effect_sizes": n_e})
+    session.commit()
+    return RedirectResponse(
+        f"/papers/{unique_id}?msg=Refreshed+from+Sheet+(%2B{n_e}+effect+sizes)",
+        status_code=status.HTTP_303_SEE_OTHER,
     )
 
 
@@ -215,6 +339,7 @@ async def paper_edit(
     paper = session.exec(select(PaperRow).where(PaperRow.unique_id == unique_id)).first()
     if not paper:
         raise HTTPException(404)
+    _require_checkout(request, paper)
 
     changes: dict[str, dict[str, str]] = {}
     for field in _editable_paper_fields():
@@ -258,6 +383,7 @@ def paper_confirm(
     paper = session.exec(select(PaperRow).where(PaperRow.unique_id == unique_id)).first()
     if not paper:
         raise HTTPException(404)
+    _require_checkout(request, paper)
     paper.status = ReviewStatus.confirmed
     paper.last_modified_by = email
     paper.updated_at = datetime.utcnow()
@@ -277,6 +403,7 @@ def paper_delete(
     paper = session.exec(select(PaperRow).where(PaperRow.unique_id == unique_id)).first()
     if not paper:
         raise HTTPException(404)
+    _require_checkout(request, paper)
     paper.status = ReviewStatus.deleted
     paper.last_modified_by = email
     paper.updated_at = datetime.utcnow()
@@ -291,6 +418,15 @@ def paper_delete(
 # ---------------------------------------------------------------------------
 
 
+def _effect_parent(session: Session, es: EffectSizeRow) -> PaperRow:
+    parent = session.exec(
+        select(PaperRow).where(PaperRow.unique_id == es.paper_unique_id)
+    ).first()
+    if not parent:
+        raise HTTPException(404)
+    return parent
+
+
 @app.post("/effect-sizes/{es_id}/edit")
 async def effect_edit(
     request: Request,
@@ -302,6 +438,7 @@ async def effect_edit(
     es = session.get(EffectSizeRow, es_id)
     if not es:
         raise HTTPException(404)
+    _require_checkout(request, _effect_parent(session, es))
 
     changes: dict[str, dict[str, str]] = {}
     for field in _editable_effect_fields():
@@ -347,6 +484,7 @@ def effect_confirm(
     es = session.get(EffectSizeRow, es_id)
     if not es:
         raise HTTPException(404)
+    _require_checkout(request, _effect_parent(session, es))
     es.status = ReviewStatus.confirmed
     es.last_modified_by = email
     es.updated_at = datetime.utcnow()
@@ -368,6 +506,7 @@ def effect_delete(
     es = session.get(EffectSizeRow, es_id)
     if not es:
         raise HTTPException(404)
+    _require_checkout(request, _effect_parent(session, es))
     es.status = ReviewStatus.deleted
     es.last_modified_by = email
     es.updated_at = datetime.utcnow()
@@ -390,6 +529,7 @@ async def effect_create(
     paper = session.exec(select(PaperRow).where(PaperRow.unique_id == unique_id)).first()
     if not paper:
         raise HTTPException(404)
+    _require_checkout(request, paper)
     kwargs = {f: str(form.get(f, "")) for f in _editable_effect_fields()}
     es = EffectSizeRow(
         paper_unique_id=unique_id,
@@ -415,6 +555,7 @@ def effect_flag_reextract(
     es = session.get(EffectSizeRow, es_id)
     if not es:
         raise HTTPException(404)
+    _require_checkout(request, _effect_parent(session, es))
     es.needs_reextraction = True
     es.status = ReviewStatus.needs_reextraction
     es.last_modified_by = email
@@ -517,18 +658,23 @@ def admin_import(
     actor = require_admin(request)
     try:
         papers, effects = pull_from_sheets()
-        n_p, n_e = import_from_sheet_rows(_engine, papers, effects, replace=True)
+        n_p, n_e, skipped = import_from_sheet_rows(
+            _engine, papers, effects, replace=True, preserve_checked_out=True
+        )
     except Exception as exc:  # noqa: BLE001
         return RedirectResponse(
             f"/admin?err={str(exc)[:300]}", status_code=status.HTTP_303_SEE_OTHER
         )
     _log(
         session, actor, "import_sheet", "sheet",
-        {"papers": n_p, "effect_sizes": n_e},
+        {"papers": n_p, "effect_sizes": n_e, "skipped": skipped},
     )
     session.commit()
+    note = f"Imported+{n_p}+papers+and+{n_e}+effect+sizes"
+    if skipped:
+        note += f".+Skipped+{len(skipped)}+checked-out+paper(s)"
     return RedirectResponse(
-        f"/admin?msg=Imported+{n_p}+papers+and+{n_e}+effect+sizes",
+        f"/admin?msg={note}",
         status_code=status.HTTP_303_SEE_OTHER,
     )
 

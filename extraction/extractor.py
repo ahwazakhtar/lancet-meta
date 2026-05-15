@@ -128,12 +128,33 @@ async def _run_openai(prompt: str) -> str:
 
     client = AsyncOpenAI(api_key=os.environ["OPENAI_API_KEY"])
     model = os.environ.get("OPENAI_MODEL", "gpt-4.1")
-    response = await client.chat.completions.create(
-        model=model,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0,
-    )
-    return response.choices[0].message.content or ""
+    max_tokens = int(os.environ.get("OPENAI_MAX_TOKENS", "16000"))
+    try:
+        response = await client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=max_tokens,
+            response_format={"type": "json_object"},
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise ExtractionError(f"OpenAI API call failed (model={model}): {exc}") from exc
+
+    choice = response.choices[0]
+    content = (choice.message.content or "").strip()
+    if not content:
+        raise ExtractionError(
+            f"OpenAI returned empty content (model={model}, "
+            f"finish_reason={choice.finish_reason}). "
+            f"If finish_reason='length', raise OPENAI_MAX_TOKENS. "
+            f"If 'content_filter', the prompt was refused."
+        )
+    if choice.finish_reason == "length":
+        logger.warning(
+            "OpenAI hit max_tokens=%d for this paper; JSON may be truncated.",
+            max_tokens,
+        )
+    return content
 
 
 def _use_openai() -> bool:
@@ -170,15 +191,31 @@ async def extract_from_markdown_async(
         raw = await _run_agent(prompt, md_path.parent)
     cleaned = _strip_code_fence(raw)
 
+    payload = _parse_json_or_fail(cleaned, md_path)
+    return _parse_paper_payload(payload, source_pdf=source_pdf, xlsx_entry=xlsx_entry)
+
+
+def _parse_json_or_fail(cleaned: str, md_path: Path) -> dict:
+    """Parse cleaned LLM output as JSON; dump it to a debug file on failure."""
+
+    def _dump_debug(text: str) -> Path:
+        debug_dir = md_path.parent.parent / "extracted_debug"
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        debug_path = debug_dir / f"{md_path.stem}.raw.txt"
+        debug_path.write_text(text or "<empty>", encoding="utf-8")
+        return debug_path
+
     try:
-        payload = json.loads(cleaned)
+        return json.loads(cleaned)
     except json.JSONDecodeError as exc:
         match = re.search(r"\{.*\}", cleaned, re.DOTALL)
-        if not match:
-            raise ExtractionError(
-                f"Could not parse JSON from Claude response for {md_path.name}: {exc}\n"
-                f"--- response ---\n{cleaned[:2000]}"
-            ) from exc
-        payload = json.loads(match.group(0))
-
-    return _parse_paper_payload(payload, source_pdf=source_pdf, xlsx_entry=xlsx_entry)
+        if match:
+            try:
+                return json.loads(match.group(0))
+            except json.JSONDecodeError:
+                pass
+        debug = _dump_debug(cleaned)
+        raise ExtractionError(
+            f"Could not parse JSON from LLM response for {md_path.name}: {exc}. "
+            f"Raw response saved to {debug}. First 500 chars: {cleaned[:500]!r}"
+        ) from exc

@@ -15,7 +15,9 @@ Or via the entrypoint script:
 
 from __future__ import annotations
 
+import logging
 import os
+from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -45,8 +47,55 @@ from .auth import authenticate, current_email, current_email_optional, require_a
 
 load_dotenv()
 
+# Logs go to stdout so Railway captures them.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+log = logging.getLogger("webapp")
+
 BASE_DIR = Path(__file__).parent
-app = FastAPI(title="Lancet Meta Review")
+
+# One shared engine for the process; SQLite is fine for an internal review tool.
+_DB_PATH = os.environ.get("WEB_DB_PATH", "data/app.db")
+_engine = get_engine(_DB_PATH)
+
+
+def _ensure_bootstrap_admin() -> None:
+    """Make sure ADMIN_BOOTSTRAP_EMAIL exists as an admin.
+
+    Idempotent: if the email is already a user, promotes them to admin and
+    leaves everything else alone. If not, inserts them. Logs what it did so
+    the Railway logs make it obvious whether the env var is wired up.
+    """
+    bootstrap = os.environ.get("ADMIN_BOOTSTRAP_EMAIL", "").strip().lower()
+    if not bootstrap:
+        log.warning("ADMIN_BOOTSTRAP_EMAIL not set; no bootstrap admin will be created.")
+        return
+    with Session(_engine) as session:
+        existing = session.exec(select(User).where(User.email == bootstrap)).first()
+        if existing:
+            if not existing.is_admin:
+                existing.is_admin = True
+                session.add(existing)
+                session.commit()
+                log.info("Bootstrap: promoted existing user %s to admin.", bootstrap)
+            else:
+                log.info("Bootstrap: %s already an admin; nothing to do.", bootstrap)
+            return
+        session.add(User(email=bootstrap, display_name="Bootstrap admin", is_admin=True))
+        session.commit()
+        log.info("Bootstrap: created admin user %s.", bootstrap)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    log.info("Starting webapp. db_path=%s", _DB_PATH)
+    _ensure_bootstrap_admin()
+    yield
+
+
+app = FastAPI(title="Lancet Meta Review", lifespan=lifespan)
 app.add_middleware(
     SessionMiddleware,
     secret_key=os.environ.get("WEB_SECRET_KEY", "change-me"),
@@ -54,9 +103,6 @@ app.add_middleware(
 )
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=BASE_DIR / "templates")
-
-# One shared engine for the process; SQLite is fine for an internal review tool.
-_engine = get_engine(os.environ.get("WEB_DB_PATH", "data/app.db"))
 
 
 def get_session() -> Session:
@@ -113,9 +159,19 @@ def login_submit(
 ):
     user = authenticate(session, email)
     if not user:
-        return RedirectResponse(
-            "/login?error=unknown", status_code=status.HTTP_303_SEE_OTHER
-        )
+        # Fallback: if the typed email matches ADMIN_BOOTSTRAP_EMAIL, run
+        # the bootstrap on demand. Lets you recover even if the lifespan
+        # hook didn't fire for any reason.
+        bootstrap = os.environ.get("ADMIN_BOOTSTRAP_EMAIL", "").strip().lower()
+        from .auth import normalize_email
+        if bootstrap and normalize_email(email) == bootstrap:
+            log.info("Bootstrap fallback at login: creating admin %s", bootstrap)
+            _ensure_bootstrap_admin()
+            user = authenticate(session, email)
+        if not user:
+            return RedirectResponse(
+                "/login?error=unknown", status_code=status.HTTP_303_SEE_OTHER
+            )
     request.session["email"] = user.email
     request.session["display_name"] = user.display_name or user.email
     request.session["is_admin"] = user.is_admin
@@ -718,25 +774,6 @@ def admin_publish(
         f"/admin?msg=Published+{n_p}+papers+and+{n_e}+effect+sizes",
         status_code=status.HTTP_303_SEE_OTHER,
     )
-
-
-# ---------------------------------------------------------------------------
-# Bootstrap: auto-create the first admin from ADMIN_BOOTSTRAP_EMAIL on startup
-# so a fresh Railway deploy is usable without shelling in.
-# ---------------------------------------------------------------------------
-
-
-@app.on_event("startup")
-def _bootstrap_admin() -> None:
-    bootstrap = os.environ.get("ADMIN_BOOTSTRAP_EMAIL", "").strip().lower()
-    if not bootstrap:
-        return
-    with Session(_engine) as session:
-        existing_users = session.exec(select(User)).first()
-        if existing_users:
-            return  # already populated; do nothing
-        session.add(User(email=bootstrap, display_name="Bootstrap admin", is_admin=True))
-        session.commit()
 
 
 # ---------------------------------------------------------------------------

@@ -246,6 +246,34 @@ def _coerce_bool(value) -> bool:
 
 
 _NEVER_OVERWRITE = {"id", "checked_out_by", "checked_out_at"}
+_DATETIME_COLS = {"extracted_at", "updated_at", "checked_out_at"}
+
+
+def _parse_dt(value):
+    """Parse a datetime string from a Sheet row. Returns None on failure so
+    the SQLModel default_factory can take over."""
+    if value is None or isinstance(value, datetime):
+        return value if isinstance(value, datetime) else None
+    s = str(value).strip()
+    if not s:
+        return None
+    # str(datetime) uses a space separator; fromisoformat in 3.11+ accepts both.
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+
+
+def _clean_datetime_fields(kwargs: dict) -> dict:
+    """Replace string datetimes with parsed ones; drop unparseable to use defaults."""
+    for k in list(kwargs.keys()):
+        if k in _DATETIME_COLS:
+            parsed = _parse_dt(kwargs[k])
+            if parsed is None:
+                del kwargs[k]
+            else:
+                kwargs[k] = parsed
+    return kwargs
 
 
 def _paper_kwargs_from_row(row: dict) -> dict:
@@ -253,7 +281,7 @@ def _paper_kwargs_from_row(row: dict) -> dict:
     out = {k: row[k] for k in cols if k in row}
     out["status"] = _coerce_status(row.get("status", "pending"))
     out["needs_reextraction"] = _coerce_bool(row.get("needs_reextraction"))
-    return out
+    return _clean_datetime_fields(out)
 
 
 def _effect_kwargs_from_row(row: dict) -> dict:
@@ -261,7 +289,7 @@ def _effect_kwargs_from_row(row: dict) -> dict:
     out = {k: row[k] for k in cols if k in row}
     out["status"] = _coerce_status(row.get("status", "pending"))
     out["needs_reextraction"] = _coerce_bool(row.get("needs_reextraction"))
-    return out
+    return _clean_datetime_fields(out)
 
 
 def import_from_sheet_rows(

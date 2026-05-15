@@ -1,0 +1,60 @@
+:root {
+  --pico-font-size: 95%;
+}
+
+.muted { color: var(--pico-muted-color); font-size: 0.9em; }
+
+.flex-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.row-actions { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+.row-actions form { margin: 0; }
+.row-actions button { margin: 0; }
+
+.field-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 0.75rem 1rem;
+  margin-bottom: 1rem;
+}
+
+.field-grid label { margin-bottom: 0; }
+.field-grid input, .field-grid textarea { margin-bottom: 0; }
+
+.field-label {
+  display: block;
+  font-size: 0.8em;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--pico-muted-color);
+  margin-bottom: 0.15rem;
+}
+
+.badge {
+  display: inline-block;
+  padding: 0.15rem 0.55rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  background: var(--pico-secondary-background);
+  color: var(--pico-secondary-inverse);
+  margin-right: 0.25rem;
+}
+
+.badge-pending { background: #94a3b8; color: white; }
+.badge-confirmed { background: #16a34a; color: white; }
+.badge-modified { background: #2563eb; color: white; }
+.badge-needs_reextraction { background: #ea580c; color: white; }
+.badge-reextract { background: #ea580c; color: white; }
+.badge-deleted { background: #6b7280; color: white; }
+
+article header .flex-row strong { font-size: 1.05rem; }
+
+table th, table td { vertical-align: middle; }

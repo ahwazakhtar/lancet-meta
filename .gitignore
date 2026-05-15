@@ -1,1 +1,25 @@
 *.pdf
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local data and credentials
+pdfs/
+data/extracted/
+data/cache/
+data/*.db
+.credentials/
+.env
+.env.local
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store

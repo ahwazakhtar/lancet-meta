@@ -1,0 +1,132 @@
+{% extends "base.html" %}
+{% block title %}{{ paper.unique_id }} · Lancet Meta Review{% endblock %}
+{% block content %}
+
+<nav aria-label="breadcrumb">
+  <ul>
+    <li><a href="/">All papers</a></li>
+    <li>{{ paper.unique_id }}</li>
+  </ul>
+</nav>
+
+<article>
+  <header>
+    <div class="flex-row">
+      <hgroup>
+        <h2>{{ paper.unique_id }}</h2>
+        <p>
+          <span class="badge badge-{{ paper.status.value }}">{{ paper.status.value }}</span>
+          {% if paper.needs_reextraction %}<span class="badge badge-reextract">re-extract</span>{% endif %}
+          {% if paper.last_modified_by %}
+            <span class="muted">· last edited by {{ paper.last_modified_by }} at {{ paper.updated_at.strftime("%Y-%m-%d %H:%M UTC") }}</span>
+          {% endif %}
+        </p>
+      </hgroup>
+      <div class="row-actions">
+        <form method="post" action="/papers/{{ paper.unique_id }}/confirm" style="display:inline">
+          <button type="submit">Confirm paper</button>
+        </form>
+        <form method="post" action="/papers/{{ paper.unique_id }}/delete" style="display:inline" onsubmit="return confirm('Delete this paper extraction?');">
+          <button type="submit" class="secondary outline">Delete</button>
+        </form>
+      </div>
+    </div>
+  </header>
+
+  <details open>
+    <summary><strong>Paper-level fields</strong></summary>
+    <form method="post" action="/papers/{{ paper.unique_id }}/edit">
+      <div class="field-grid">
+        {% for field in paper_fields %}
+          <label>
+            <span class="field-label">{{ field.replace("_", " ") }}</span>
+            {% set val = paper[field] %}
+            {% if val and val|length > 80 %}
+              <textarea name="{{ field }}" rows="3">{{ val }}</textarea>
+            {% else %}
+              <input type="text" name="{{ field }}" value="{{ val or '' }}">
+            {% endif %}
+          </label>
+        {% endfor %}
+      </div>
+      <label>
+        <span class="field-label">Reviewer notes (paper)</span>
+        <textarea name="reviewer_notes" rows="2">{{ paper.reviewer_notes }}</textarea>
+      </label>
+      <label>
+        <input type="checkbox" name="needs_reextraction" {% if paper.needs_reextraction %}checked{% endif %}>
+        Flag this paper for re-extraction
+      </label>
+      <button type="submit">Save paper edits</button>
+    </form>
+  </details>
+</article>
+
+<hr>
+
+<section>
+  <hgroup>
+    <h3>Effect sizes ({{ effects|length }})</h3>
+    <p>Each row is one effect-size estimate. Confirm, edit, delete, or flag for re-extraction.</p>
+  </hgroup>
+
+  {% for es in effects %}
+    <article id="es-{{ es.id }}">
+      <header>
+        <div class="flex-row">
+          <strong>{{ es.outcome_name|truncate(80) or "(no outcome name)" }}</strong>
+          <span>
+            <span class="badge badge-{{ es.status.value }}">{{ es.status.value }}</span>
+            {% if es.needs_reextraction %}<span class="badge badge-reextract">re-extract</span>{% endif %}
+          </span>
+        </div>
+      </header>
+
+      <form method="post" action="/effect-sizes/{{ es.id }}/edit">
+        <div class="field-grid">
+          {% for field in effect_fields %}
+            <label>
+              <span class="field-label">{{ field.replace("_", " ") }}</span>
+              {% set val = es[field] %}
+              {% if val and val|length > 80 %}
+                <textarea name="{{ field }}" rows="2">{{ val }}</textarea>
+              {% else %}
+                <input type="text" name="{{ field }}" value="{{ val or '' }}">
+              {% endif %}
+            </label>
+          {% endfor %}
+        </div>
+        <label>
+          <span class="field-label">Reviewer notes</span>
+          <textarea name="reviewer_notes" rows="2">{{ es.reviewer_notes }}</textarea>
+        </label>
+        <label>
+          <input type="checkbox" name="needs_reextraction" {% if es.needs_reextraction %}checked{% endif %}>
+          Needs re-extraction
+        </label>
+        <div class="row-actions">
+          <button type="submit">Save edits</button>
+          <button type="submit" formaction="/effect-sizes/{{ es.id }}/confirm" class="contrast">Confirm</button>
+          <button type="submit" formaction="/effect-sizes/{{ es.id }}/delete" class="secondary outline"
+                  onclick="return confirm('Delete this effect size?');">Delete</button>
+        </div>
+      </form>
+    </article>
+  {% endfor %}
+
+  <details>
+    <summary><strong>Add a new effect size</strong></summary>
+    <form method="post" action="/papers/{{ paper.unique_id }}/effect-sizes/new">
+      <div class="field-grid">
+        {% for field in effect_fields %}
+          <label>
+            <span class="field-label">{{ field.replace("_", " ") }}</span>
+            <input type="text" name="{{ field }}">
+          </label>
+        {% endfor %}
+      </div>
+      <button type="submit">Add effect size</button>
+    </form>
+  </details>
+</section>
+{% endblock %}

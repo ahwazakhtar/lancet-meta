@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}Papers · Lancet Meta Review{% endblock %}
+{% block content %}
+<hgroup>
+  <h2>Papers</h2>
+  <p>{{ papers|length }} paper(s) in the extraction queue.</p>
+</hgroup>
+
+<form method="get" action="/" role="search">
+  <div class="grid">
+    <input type="search" name="q" value="{{ q }}" placeholder="Search by unique ID, authors, intervention…">
+    <select name="status_filter">
+      <option value="">All statuses</option>
+      {% for s in statuses %}
+        <option value="{{ s }}" {% if status_filter == s %}selected{% endif %}>{{ s }}</option>
+      {% endfor %}
+    </select>
+    <button type="submit">Filter</button>
+  </div>
+</form>
+
+<figure>
+<table>
+  <thead>
+    <tr>
+      <th>Unique ID</th>
+      <th>Authors</th>
+      <th>Year</th>
+      <th>Intervention</th>
+      <th>Effect sizes</th>
+      <th>Status</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for p in papers %}
+      <tr>
+        <td><strong>{{ p.unique_id }}</strong></td>
+        <td>{{ p.authors|truncate(60) }}</td>
+        <td>{{ p.year }}</td>
+        <td>{{ p.intervention_category|truncate(40) }}</td>
+        <td>{{ es_counts.get(p.unique_id, 0) }}</td>
+        <td>
+          <span class="badge badge-{{ p.status.value }}">{{ p.status.value }}</span>
+          {% if p.needs_reextraction %}<span class="badge badge-reextract">re-extract</span>{% endif %}
+        </td>
+        <td><a href="/papers/{{ p.unique_id }}" role="button" class="outline">Review</a></td>
+      </tr>
+    {% endfor %}
+  </tbody>
+</table>
+</figure>
+{% endblock %}

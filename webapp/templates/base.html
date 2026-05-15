@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Lancet Meta Review{% endblock %}</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="https://unpkg.com/htmx.org@2.0.2"></script>
+</head>
+<body>
+  <header class="container">
+    <nav>
+      <ul>
+        <li><strong><a href="/">Lancet Meta Review</a></strong></li>
+      </ul>
+      <ul>
+        {% if username %}
+          <li><span class="muted">{{ username }}</span></li>
+          <li>
+            <form method="post" action="/logout" style="display:inline;margin:0;">
+              <button class="secondary outline" type="submit">Sign out</button>
+            </form>
+          </li>
+        {% endif %}
+      </ul>
+    </nav>
+  </header>
+  <main class="container">
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>

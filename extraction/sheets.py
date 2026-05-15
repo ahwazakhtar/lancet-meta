@@ -58,14 +58,23 @@ EFFECT_SIZE_SHEET_COLUMNS = [
 def _credentials() -> Credentials:
     raw_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
     if raw_json:
-        info = json.loads(raw_json)
+        try:
+            info = json.loads(raw_json)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                "GOOGLE_SERVICE_ACCOUNT_JSON is set but does not contain valid JSON. "
+                "Re-paste the entire content of the service-account key file (a single "
+                "JSON object starting with '{' and ending with '}'). "
+                f"Parser said: {exc}"
+            ) from exc
         return Credentials.from_service_account_info(info, scopes=SCOPES)
     creds_path = os.environ.get("GOOGLE_SERVICE_ACCOUNT_FILE")
     if creds_path and Path(creds_path).exists():
         return Credentials.from_service_account_file(creds_path, scopes=SCOPES)
     raise RuntimeError(
-        "Set GOOGLE_SERVICE_ACCOUNT_JSON (raw JSON) or GOOGLE_SERVICE_ACCOUNT_FILE "
-        "(path to JSON key)."
+        "Google Sheets credentials are not configured. Set either "
+        "GOOGLE_SERVICE_ACCOUNT_JSON (raw JSON content, recommended on Railway) "
+        "or GOOGLE_SERVICE_ACCOUNT_FILE (path to a JSON key, recommended locally)."
     )
 
 

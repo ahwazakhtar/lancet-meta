@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .paper_list import PaperListEntry, study_id_to_unique_id
-from .prompts import build_extraction_prompt
+from .prompts import build_extraction_prompt, build_extraction_prompt_with_content
 from .schema import NA, EffectSize, Paper
 
 logger = logging.getLogger(__name__)
@@ -122,20 +122,52 @@ async def _run_agent(prompt: str, work_dir: Path) -> str:
     return "\n".join(parts).strip()
 
 
+async def _run_openai(prompt: str) -> str:
+    import os
+    from openai import AsyncOpenAI
+
+    client = AsyncOpenAI(api_key=os.environ["OPENAI_API_KEY"])
+    model = os.environ.get("OPENAI_MODEL", "gpt-4.1")
+    response = await client.chat.completions.create(
+        model=model,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0,
+    )
+    return response.choices[0].message.content or ""
+
+
+def _use_openai() -> bool:
+    import os
+    return bool(os.environ.get("OPENAI_API_KEY"))
+
+
 def extract_from_markdown(
     md_path: Path,
     source_pdf: str,
     xlsx_entry: Optional[PaperListEntry] = None,
 ) -> Paper:
     """Extract a single pre-processed markdown into a `Paper`."""
+    return asyncio.run(extract_from_markdown_async(md_path, source_pdf, xlsx_entry))
+
+
+async def extract_from_markdown_async(
+    md_path: Path,
+    source_pdf: str,
+    xlsx_entry: Optional[PaperListEntry] = None,
+) -> Paper:
     md_path = md_path.resolve()
     if not md_path.exists():
         raise ExtractionError(f"Markdown does not exist: {md_path}")
 
-    prompt = build_extraction_prompt(md_path.name, xlsx_entry)
-    logger.info("Extracting %s via Claude Agent SDK", md_path.name)
-
-    raw = asyncio.run(_run_agent(prompt, md_path.parent))
+    if _use_openai():
+        logger.info("Extracting %s via OpenAI", md_path.name)
+        md_content = md_path.read_text(encoding="utf-8")
+        prompt = build_extraction_prompt_with_content(md_content, xlsx_entry)
+        raw = await _run_openai(prompt)
+    else:
+        logger.info("Extracting %s via Claude Agent SDK", md_path.name)
+        prompt = build_extraction_prompt(md_path.name, xlsx_entry)
+        raw = await _run_agent(prompt, md_path.parent)
     cleaned = _strip_code_fence(raw)
 
     try:

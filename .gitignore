@@ -13,6 +13,7 @@ venv/
 # Local data and credentials
 pdfs/
 data/extracted/
+data/preprocessed/
 data/cache/
 data/*.db
 .credentials/

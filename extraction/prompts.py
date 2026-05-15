@@ -21,12 +21,22 @@ def _field_table(fields: list[FieldSpec]) -> str:
     return "\n".join(lines)
 
 
-def build_extraction_prompt(md_path: str, xlsx_entry: Optional[PaperListEntry] = None) -> str:
-    """Prompt sent to Claude (via Agent SDK) to extract a single paper.
+def build_extraction_prompt_with_content(
+    md_content: str, xlsx_entry: Optional[PaperListEntry] = None
+) -> str:
+    """Prompt for direct API calls — embeds the markdown content inline."""
+    return build_extraction_prompt(md_path=None, xlsx_entry=xlsx_entry, md_content=md_content)
 
-    `md_path` is the path of the pre-processed markdown (text + tables).
-    `xlsx_entry` is the curated paper-list row matched to this paper (if any),
-    which Claude should treat as authoritative for bibliographic metadata.
+
+def build_extraction_prompt(
+    md_path: Optional[str],
+    xlsx_entry: Optional[PaperListEntry] = None,
+    md_content: Optional[str] = None,
+) -> str:
+    """Prompt sent to the LLM to extract a single paper.
+
+    Pass `md_path` for Agent SDK (model reads the file itself).
+    Pass `md_content` for direct API calls (content embedded inline).
     """
 
     paper_fields = _field_table(PAPER_FIELDS)
@@ -66,12 +76,19 @@ been hand-curated and should not be re-derived from the PDF.
     else:
         biblio_block = ""
 
+    if md_content is not None:
+        paper_block = f"""# Paper content
+
+{md_content}"""
+    else:
+        paper_block = f"Read the pre-processed markdown for the paper at path: `{md_path}`"
+
     return f"""You are an expert evidence-synthesis assistant extracting structured data
 from a research paper for a Lancet meta-analysis on gun violence interventions.
 
 # Task
 
-Read the pre-processed markdown for the paper at path: `{md_path}`
+{paper_block}
 
 The markdown contains the paper's full text by page, followed by every table
 extracted from the PDF rendered as a markdown table. Effect sizes will most

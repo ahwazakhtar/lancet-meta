@@ -16,6 +16,7 @@ Other commands:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from pathlib import Path
@@ -27,7 +28,7 @@ from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 from sqlmodel import Session, select
 
-from .extractor import ExtractionError, extract_from_markdown
+from .extractor import ExtractionError, extract_from_markdown, extract_from_markdown_async
 from .paper_list import load_paper_list, lookup_by_doi
 from .preprocess import preprocess_pdf
 from .schema import Paper
@@ -135,13 +136,14 @@ def extract(
     skip_existing: bool = typer.Option(True, help="Skip markdowns already in the JSON cache."),
     limit: Optional[int] = typer.Option(None, help="Process at most N files."),
     require_doi: bool = typer.Option(False, help="Skip papers with no DOI match in the xlsx."),
+    concurrency: int = typer.Option(5, help="Number of papers to extract in parallel."),
     publish: bool = typer.Option(
         False,
         "--publish/--no-publish",
         help="After successful extraction, push the SQLite contents to the Google Sheet.",
     ),
 ) -> None:
-    """Run Claude over each preprocessed markdown to produce structured data."""
+    """Run Claude over each preprocessed markdown to produce structured data (parallel)."""
     engine = get_engine(_db_path())
     cache_dir = _extracted_dir()
     by_doi, _all = load_paper_list(_xlsx_path())
@@ -156,43 +158,43 @@ def extract(
     if limit is not None:
         files = files[:limit]
 
-    console.print(f"Extracting [bold]{len(files)}[/bold] paper(s)")
-
-    with Progress(SpinnerColumn(), TextColumn("{task.description}"), TimeElapsedColumn(), console=console) as prog:
-        task = prog.add_task("Extracting", total=len(files))
-        for md_path in files:
-            cache_file = cache_dir / f"{md_path.stem}.json"
-            if skip_existing and cache_file.exists():
-                prog.console.log(f"skip (cached): {md_path.name}")
-                prog.advance(task)
-                continue
-
-            # Recover DOI from the markdown header (we wrote it during preprocess).
-            doi = _doi_from_md(md_path)
-            entry = lookup_by_doi(by_doi, doi) if doi else None
-            if require_doi and entry is None:
-                prog.console.log(f"[yellow]skip[/yellow] {md_path.name}: no xlsx match for doi={doi}")
-                prog.advance(task)
-                continue
-
-            prog.update(task, description=f"Extracting {md_path.name}")
-            try:
-                paper = extract_from_markdown(md_path, source_pdf=md_path.name, xlsx_entry=entry)
-            except ExtractionError as exc:
-                prog.console.log(f"[red]FAIL[/red] {md_path.name}: {exc}")
-                prog.advance(task)
-                continue
-
-            cache_file.write_text(paper.model_dump_json(indent=2))
-            upsert_paper(engine, paper)
-            prog.console.log(
-                f"[green]OK[/green] {md_path.name}: {paper.unique_id} · {len(paper.effect_sizes)} effect size(s)"
-            )
-            prog.advance(task)
+    console.print(f"Extracting [bold]{len(files)}[/bold] paper(s) (concurrency={concurrency})")
+    asyncio.run(_extract_all(files, engine, cache_dir, by_doi, skip_existing, require_doi, concurrency))
 
     if publish:
         console.print("Publishing to Google Sheet...")
         _do_publish(engine)
+
+
+async def _extract_all(files, engine, cache_dir, by_doi, skip_existing, require_doi, concurrency):
+    sem = asyncio.Semaphore(concurrency)
+    db_lock = asyncio.Lock()
+
+    async def process_one(md_path):
+        cache_file = cache_dir / f"{md_path.stem}.json"
+        if skip_existing and cache_file.exists():
+            console.print(f"skip (cached): {md_path.name}")
+            return
+
+        doi = _doi_from_md(md_path)
+        entry = lookup_by_doi(by_doi, doi) if doi else None
+        if require_doi and entry is None:
+            console.print(f"[yellow]skip[/yellow] {md_path.name}: no xlsx match for doi={doi}")
+            return
+
+        async with sem:
+            try:
+                paper = await extract_from_markdown_async(md_path, source_pdf=md_path.name, xlsx_entry=entry)
+            except ExtractionError as exc:
+                console.print(f"[red]FAIL[/red] {md_path.name}: {exc}")
+                return
+
+        cache_file.write_text(paper.model_dump_json(indent=2), encoding="utf-8")
+        async with db_lock:
+            upsert_paper(engine, paper)
+        console.print(f"[green]OK[/green] {md_path.name}: {paper.unique_id} · {len(paper.effect_sizes)} effect size(s)")
+
+    await asyncio.gather(*[process_one(f) for f in files])
 
 
 def _doi_from_md(md_path: Path) -> Optional[str]:

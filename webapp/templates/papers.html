@@ -5,34 +5,32 @@
 {% if msg %}<p class="msg-success">{{ msg }}</p>{% endif %}
 {% if err %}<p class="msg-error">{{ err }}</p>{% endif %}
 
-<div class="flex-row" style="align-items:flex-end;">
+<div class="page-head">
   <hgroup>
     <h2>Papers</h2>
-    <p>{{ papers|length }} paper(s) visible. Check a paper out before editing it.</p>
+    <p>{{ papers|length }} paper(s) visible. Check a paper out before editing.</p>
   </hgroup>
-  <form method="post" action="/refresh-from-sheet" style="margin:0;"
+  <form method="post" action="/refresh-from-sheet"
         onsubmit="return confirm('Refresh papers from the Google Sheet?\n\nThis replaces every paper EXCEPT any that someone has checked out.');">
     <button type="submit" class="outline">↻ Refresh from Sheet</button>
   </form>
 </div>
 
-<form method="get" action="/" role="search">
-  <div class="grid">
-    <input type="search" name="q" value="{{ q }}" placeholder="Search by unique ID, authors, intervention, title…">
-    <select name="status_filter">
-      <option value="">All statuses</option>
-      {% for s in statuses %}
-        <option value="{{ s }}" {% if status_filter == s %}selected{% endif %}>{{ s }}</option>
-      {% endfor %}
-    </select>
-    <select name="checkout_filter">
-      <option value="">Any checkout state</option>
-      <option value="mine" {% if checkout_filter == 'mine' %}selected{% endif %}>Checked out by me</option>
-      <option value="held" {% if checkout_filter == 'held' %}selected{% endif %}>Checked out (anyone)</option>
-      <option value="available" {% if checkout_filter == 'available' %}selected{% endif %}>Available</option>
-    </select>
-    <button type="submit">Filter</button>
-  </div>
+<form method="get" action="/" role="search" class="filter-bar">
+  <input type="search" name="q" value="{{ q }}" placeholder="Search by unique ID, authors, intervention, title…">
+  <select name="status_filter">
+    <option value="">All statuses</option>
+    {% for s in statuses %}
+      <option value="{{ s }}" {% if status_filter == s %}selected{% endif %}>{{ s }}</option>
+    {% endfor %}
+  </select>
+  <select name="checkout_filter">
+    <option value="">Any checkout state</option>
+    <option value="mine" {% if checkout_filter == 'mine' %}selected{% endif %}>Checked out by me</option>
+    <option value="held" {% if checkout_filter == 'held' %}selected{% endif %}>Checked out (anyone)</option>
+    <option value="available" {% if checkout_filter == 'available' %}selected{% endif %}>Available</option>
+  </select>
+  <button type="submit">Filter</button>
 </form>
 
 <figure>

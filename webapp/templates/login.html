@@ -1,23 +1,24 @@
 {% extends "base.html" %}
 {% block title %}Sign in · Lancet Meta Review{% endblock %}
 {% block content %}
-<article style="max-width: 28rem; margin: 4rem auto;">
+<article class="login-card">
   <hgroup>
-    <h2>Sign in</h2>
+    <h2>Welcome back</h2>
     <p>Enter your email to start reviewing.</p>
   </hgroup>
   {% if error == "unknown" %}
-    <p class="msg-error">That email isn't on the reviewer list. Ask the admin to add you.</p>
+    <p class="msg-error">That email isn't on the reviewer list. Ask an admin to add you.</p>
   {% endif %}
   <form method="post" action="/login">
-    <label>Email
-      <input type="email" name="email" required autofocus autocomplete="email">
+    <label>
+      <span class="field-label">Email</span>
+      <input type="email" name="email" required autofocus autocomplete="email" placeholder="you@example.com">
     </label>
-    <button type="submit">Sign in</button>
+    <button type="submit" style="width:100%;">Sign in</button>
   </form>
-  <p class="muted" style="margin-top:1.5rem;font-size:0.85em;">
-    Sign-in is by email only — there is no password. This is for tracking who
-    edits what, not for security.
+  <p class="muted" style="margin-top:1.25rem;font-size:0.85em;text-align:center;">
+    Sign-in is email-only — there's no password.<br>
+    Your email is recorded against every edit for attribution.
   </p>
 </article>
 {% endblock %}

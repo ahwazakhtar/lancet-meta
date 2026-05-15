@@ -1,33 +1,41 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="light">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}Lancet Meta Review{% endblock %}</title>
+  <link rel="preconnect" href="https://rsms.me/">
+  <link rel="stylesheet" href="https://rsms.me/inter/inter.css">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
   <link rel="stylesheet" href="/static/app.css">
   <script src="https://unpkg.com/htmx.org@2.0.2"></script>
 </head>
 <body>
-  <header class="container">
-    <nav>
-      <ul>
-        <li><strong><a href="/">Lancet Meta Review</a></strong></li>
-      </ul>
-      <ul>
+  <header class="app-header">
+    <div class="container">
+      <nav>
+        <div class="brand">
+          <a href="/" class="brand-link">
+            <span class="brand-mark">●</span>
+            <span class="brand-name">Lancet Meta Review</span>
+          </a>
+        </div>
         {% if display_name %}
-          {% if request.session.get('is_admin') %}
-            <li><a href="/admin">Admin</a></li>
-          {% endif %}
-          <li><span class="muted">{{ display_name }}</span></li>
-          <li>
-            <form method="post" action="/logout" style="display:inline;margin:0;">
-              <button class="secondary outline" type="submit">Sign out</button>
+          <div class="nav-right">
+            {% if request.session.get('is_admin') %}
+              <a href="/admin" class="nav-link">Admin</a>
+            {% endif %}
+            <div class="user-chip">
+              <span class="user-avatar">{{ display_name[:1]|upper }}</span>
+              <span class="user-name">{{ display_name }}</span>
+            </div>
+            <form method="post" action="/logout">
+              <button class="btn-ghost" type="submit">Sign out</button>
             </form>
-          </li>
+          </div>
         {% endif %}
-      </ul>
-    </nav>
+      </nav>
+    </div>
   </header>
   <main class="container">
     {% block content %}{% endblock %}

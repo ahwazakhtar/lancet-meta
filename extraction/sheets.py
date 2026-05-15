@@ -63,13 +63,18 @@ def _credentials() -> Credentials:
     if raw_b64:
         import binascii
         import base64
+
+        # Be forgiving of common copy-paste accidents: surrounding quotes,
+        # newlines mid-string, trailing whitespace from PowerShell, etc.
+        cleaned = raw_b64.strip().strip('"').strip("'")
+        cleaned = "".join(cleaned.split())  # drop any embedded whitespace
         try:
-            decoded = base64.b64decode(raw_b64, validate=True).decode("utf-8")
-        except (binascii.Error, UnicodeDecodeError) as exc:
+            decoded = base64.b64decode(cleaned).decode("utf-8")
+        except (binascii.Error, UnicodeDecodeError, ValueError) as exc:
             raise RuntimeError(
-                "GOOGLE_SERVICE_ACCOUNT_JSON_B64 is set but is not valid base64. "
-                "Generate it from your key file with: `base64 -w0 < key.json` "
-                f"(Linux) or `base64 < key.json | tr -d '\\n'` (macOS). "
+                "GOOGLE_SERVICE_ACCOUNT_JSON_B64 is set but couldn't be decoded as "
+                "base64. Re-generate from your key file with PowerShell: "
+                "`[Convert]::ToBase64String([IO.File]::ReadAllBytes('key.json'))`. "
                 f"Decoder said: {exc}"
             ) from exc
         try:

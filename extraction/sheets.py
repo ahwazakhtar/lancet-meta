@@ -64,13 +64,11 @@ def _credentials() -> Credentials:
         import binascii
         import base64
 
-        # Be forgiving of common copy-paste accidents: surrounding quotes,
-        # newlines mid-string, trailing whitespace from PowerShell, etc.
         cleaned = raw_b64.strip().strip('"').strip("'")
-        cleaned = "".join(cleaned.split())  # drop any embedded whitespace
+        cleaned = "".join(cleaned.split())
         try:
-            decoded = base64.b64decode(cleaned).decode("utf-8")
-        except (binascii.Error, UnicodeDecodeError, ValueError) as exc:
+            decoded_bytes = base64.b64decode(cleaned)
+        except (binascii.Error, ValueError) as exc:
             raise RuntimeError(
                 "GOOGLE_SERVICE_ACCOUNT_JSON_B64 is set but couldn't be decoded as "
                 "base64. Re-generate from your key file with PowerShell: "
@@ -78,13 +76,24 @@ def _credentials() -> Credentials:
                 f"Decoder said: {exc}"
             ) from exc
         try:
-            info = json.loads(decoded)
-        except json.JSONDecodeError as exc:
+            # json.loads accepts bytes and auto-detects UTF-8 / UTF-16 / UTF-32,
+            # so encoding mismatches in the source file don't bite us here.
+            info = json.loads(decoded_bytes)
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            preview = decoded_bytes[:80]
             raise RuntimeError(
-                "GOOGLE_SERVICE_ACCOUNT_JSON_B64 decoded successfully but the "
-                "result isn't valid JSON. Did you base64-encode the right file? "
-                f"Parser said: {exc}"
+                "GOOGLE_SERVICE_ACCOUNT_JSON_B64 decoded but the result isn't "
+                "valid JSON. Most likely causes: you encoded a .p12 file instead "
+                "of the .json key, or the file is corrupted. The decoded content "
+                f"starts with: {preview!r}. Parser said: {exc}"
             ) from exc
+        if not isinstance(info, dict) or "client_email" not in info:
+            raise RuntimeError(
+                "GOOGLE_SERVICE_ACCOUNT_JSON_B64 decoded into JSON but it doesn't "
+                "look like a Google service account key (missing 'client_email'). "
+                "Make sure you encoded the .json service-account key from Google "
+                "Cloud, not a different file."
+            )
         return Credentials.from_service_account_info(info, scopes=SCOPES)
 
     # Raw JSON in the env var (works if your dashboard doesn't mangle quotes).

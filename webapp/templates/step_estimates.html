@@ -1,0 +1,181 @@
+{% extends "paper_review.html" %}
+{% block step_content %}
+
+<section>
+  <hgroup>
+    <h3>Step 4 — Confirm effect-size estimates</h3>
+    <p>For each (table × outcome × timepoint) triple, confirm / edit / delete / add the estimate the paper reports.</p>
+  </hgroup>
+
+  {% if not tables %}
+    <p class="muted">No effect-size tables yet. <a href="/papers/{{ paper.unique_id }}/tables">Go back to Step 1</a> to declare one.</p>
+  {% endif %}
+
+  {% for t in tables %}
+    <article id="t-{{ t.id }}" class="table-card">
+      <div class="table-card-head">
+        <hgroup style="margin: 0;">
+          <h4 style="margin: 0; font-size: 1.05rem;">{{ t.table_label }}</h4>
+        </hgroup>
+      </div>
+
+      {% if t.body_markdown %}
+        <details>
+          <summary>Show table body</summary>
+          <div class="md-table-wrap">
+            <pre style="white-space: pre-wrap; font-size: 0.82rem; margin: 0;">{{ t.body_markdown }}</pre>
+          </div>
+        </details>
+      {% endif %}
+
+      {% set table_outcomes = outcomes_by_table.get(t.id, []) %}
+      {% set table_tps = timepoints_by_table.get(t.id, []) %}
+      {% set table_estimates = estimates_by_table.get(t.id, []) %}
+
+      <h5 style="margin-top: 1rem;">Estimates</h5>
+      {% if not table_outcomes or not table_tps %}
+        <p class="muted">Add at least one outcome (Step 2) and one timepoint (Step 3) before adding estimates for this table.</p>
+      {% endif %}
+
+      {% if not table_estimates %}
+        <p class="muted">No estimates yet for this table.</p>
+      {% endif %}
+
+      {% for es in table_estimates %}
+        <div id="es-{{ es.id }}" class="child-card">
+          <div class="flex-row">
+            <strong>{{ es.outcome_name|truncate(80) or "(no outcome)" }} · {{ es.timepoints|truncate(40) }}</strong>
+            <span>
+              <span class="badge badge-{{ es.status.value }}">{{ es.status.value }}</span>
+              {% if es.needs_reextraction %}<span class="badge badge-reextract">re-extract</span>{% endif %}
+            </span>
+          </div>
+
+          <form method="post" action="/effect-sizes/{{ es.id }}/edit">
+            <fieldset {% if not can_edit %}disabled{% endif %}>
+              <div class="field-grid">
+                <label>
+                  <span class="field-label">linked outcome</span>
+                  <select name="outcome_id">
+                    <option value="" {% if not es.outcome_id %}selected{% endif %}>— unlinked —</option>
+                    {% for o in table_outcomes %}
+                      <option value="{{ o.id }}" {% if es.outcome_id == o.id %}selected{% endif %}>{{ o.outcome_name|truncate(60) }}</option>
+                    {% endfor %}
+                  </select>
+                </label>
+                <label>
+                  <span class="field-label">linked timepoint</span>
+                  <select name="timepoint_id">
+                    <option value="" {% if not es.timepoint_id %}selected{% endif %}>— unlinked —</option>
+                    {% for tp in table_tps %}
+                      <option value="{{ tp.id }}" {% if es.timepoint_id == tp.id %}selected{% endif %}>{{ tp.timepoint_label|truncate(60) }}</option>
+                    {% endfor %}
+                  </select>
+                </label>
+              </div>
+              <div class="field-grid">
+                {% for field in effect_fields %}
+                  <label>
+                    <span class="field-label">{{ field.replace("_", " ") }}</span>
+                    {% set val = es[field] %}
+                    {% if val and val|length > 80 %}
+                      <textarea name="{{ field }}" rows="2">{{ val }}</textarea>
+                    {% else %}
+                      <input type="text" name="{{ field }}" value="{{ val or '' }}">
+                    {% endif %}
+                  </label>
+                {% endfor %}
+              </div>
+              <label>
+                <span class="field-label">Reviewer notes</span>
+                <textarea name="reviewer_notes" rows="2">{{ es.reviewer_notes }}</textarea>
+              </label>
+              <label>
+                <input type="checkbox" name="needs_reextraction" {% if es.needs_reextraction %}checked{% endif %}>
+                Needs re-extraction
+              </label>
+              <div class="row-actions">
+                <button type="submit">Save edits</button>
+                <button type="submit" formaction="/effect-sizes/{{ es.id }}/confirm" class="contrast">Confirm</button>
+                <button type="submit" formaction="/effect-sizes/{{ es.id }}/flag-reextract" class="secondary outline">Flag re-extract</button>
+                <button type="submit" formaction="/effect-sizes/{{ es.id }}/delete" class="secondary outline"
+                        onclick="return confirm('Delete this estimate?');">Delete</button>
+              </div>
+            </fieldset>
+          </form>
+        </div>
+      {% endfor %}
+
+      {% if table_outcomes and table_tps %}
+        <details>
+          <summary><strong>Add estimate</strong></summary>
+          <form method="post" action="/papers/{{ paper.unique_id }}/effect-sizes/new">
+            <fieldset {% if not can_edit %}disabled{% endif %}>
+              <input type="hidden" name="table_id" value="{{ t.id }}">
+              <div class="field-grid">
+                <label>
+                  <span class="field-label">outcome</span>
+                  <select name="outcome_id" required>
+                    {% for o in table_outcomes %}
+                      <option value="{{ o.id }}">{{ o.outcome_name|truncate(60) }}</option>
+                    {% endfor %}
+                  </select>
+                </label>
+                <label>
+                  <span class="field-label">timepoint</span>
+                  <select name="timepoint_id" required>
+                    {% for tp in table_tps %}
+                      <option value="{{ tp.id }}">{{ tp.timepoint_label|truncate(60) }}</option>
+                    {% endfor %}
+                  </select>
+                </label>
+              </div>
+              <div class="field-grid">
+                {% for field in effect_fields %}
+                  <label>
+                    <span class="field-label">{{ field.replace("_", " ") }}</span>
+                    <input type="text" name="{{ field }}">
+                  </label>
+                {% endfor %}
+              </div>
+              <button type="submit">Add estimate</button>
+            </fieldset>
+          </form>
+        </details>
+      {% endif %}
+    </article>
+  {% endfor %}
+
+  {% if orphan_estimates %}
+    <article class="table-card">
+      <h4>Orphan estimates</h4>
+      <p class="muted">These estimates are not linked to any current table — typically rows imported from the old flat schema, or rows whose table was deleted. Re-link them via the dropdowns or delete them.</p>
+      {% for es in orphan_estimates %}
+        <div id="es-{{ es.id }}" class="child-card">
+          <div class="flex-row">
+            <strong>{{ es.outcome_name|truncate(80) or "(no outcome)" }}</strong>
+            <span>
+              <span class="badge badge-{{ es.status.value }}">{{ es.status.value }}</span>
+              {% if es.needs_reextraction %}<span class="badge badge-reextract">re-extract</span>{% endif %}
+            </span>
+          </div>
+          <form method="post" action="/effect-sizes/{{ es.id }}/delete"
+                onsubmit="return confirm('Delete this orphan estimate?');">
+            <fieldset {% if not can_edit %}disabled{% endif %}>
+              <button type="submit" class="secondary outline">Delete</button>
+            </fieldset>
+          </form>
+        </div>
+      {% endfor %}
+    </article>
+  {% endif %}
+
+  {% if tables %}
+    <hr>
+    <p class="row-actions">
+      <a href="/papers/{{ paper.unique_id }}/timepoints" role="button" class="outline">← Timepoints</a>
+    </p>
+  {% endif %}
+</section>
+
+{% endblock %}

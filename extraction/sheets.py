@@ -1,9 +1,12 @@
 """
 Google Sheets sync.
 
-Two tabs:
-  - papers       (one row per paper)
-  - effect_sizes (one row per effect size, linked by paper_unique_id)
+Five tabs:
+  - papers           (one row per paper)
+  - paper_tables     (one row per markdown table parsed from a paper)
+  - table_outcomes   (one row per outcome confirmed in a declared table)
+  - table_timepoints (one row per timepoint confirmed in a declared table)
+  - effect_sizes     (one row per estimate, linked by paper_unique_id + FKs)
 
 Authentication: either
   - GOOGLE_SERVICE_ACCOUNT_FILE (path to JSON key) — convenient locally
@@ -25,7 +28,13 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 from .schema import effect_size_field_names, paper_field_names
-from .storage import EffectSizeRow, PaperRow
+from .storage import (
+    EffectSizeRow,
+    PaperRow,
+    PaperTable,
+    TableOutcome,
+    TableTimepoint,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -43,9 +52,53 @@ PAPER_SHEET_COLUMNS = [
     "updated_at",
 ]
 
+PAPER_TABLE_SHEET_COLUMNS = [
+    "id",
+    "paper_unique_id",
+    "table_label",
+    "page",
+    "table_index",
+    "is_effect_size",
+    "is_manual",
+    "status",
+    "last_modified_by",
+    "updated_at",
+    # `body_markdown` deliberately omitted from Sheet — Sheet cells choke on
+    # large blobs and reviewers don't edit raw markdown. It's re-parsed from
+    # the preprocessed md on extraction.
+]
+
+TABLE_OUTCOME_SHEET_COLUMNS = [
+    "id",
+    "table_id",
+    "paper_unique_id",
+    "outcome_name",
+    "outcome_domain",
+    "outcome_definition",
+    "status",
+    "reviewer_notes",
+    "last_modified_by",
+    "updated_at",
+]
+
+TABLE_TIMEPOINT_SHEET_COLUMNS = [
+    "id",
+    "table_id",
+    "paper_unique_id",
+    "timepoint_label",
+    "outcome_timeframe_months",
+    "status",
+    "reviewer_notes",
+    "last_modified_by",
+    "updated_at",
+]
+
 EFFECT_SIZE_SHEET_COLUMNS = [
     "es_id",
     "paper_unique_id",
+    "table_id",
+    "outcome_id",
+    "timepoint_id",
     *effect_size_field_names(),
     "status",
     "needs_reextraction",
@@ -56,9 +109,6 @@ EFFECT_SIZE_SHEET_COLUMNS = [
 
 
 def _credentials() -> Credentials:
-    # Easiest on Railway: paste the three values from the JSON file into
-    # individual env vars. The private key supports either real newlines or
-    # literal \n escape sequences (which we convert back to newlines).
     sa_email = os.environ.get("GOOGLE_CLIENT_EMAIL")
     sa_key = os.environ.get("GOOGLE_PRIVATE_KEY")
     if sa_email and sa_key:
@@ -73,8 +123,6 @@ def _credentials() -> Credentials:
             "token_uri": "https://oauth2.googleapis.com/token",
             "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
         }
-        # Make the private key newline-handling idempotent — strip wrapping
-        # quotes were already removed; ensure it actually contains BEGIN/END.
         pk = info["private_key"]
         if "BEGIN PRIVATE KEY" not in pk or "END PRIVATE KEY" not in pk:
             raise RuntimeError(
@@ -85,7 +133,6 @@ def _credentials() -> Credentials:
             )
         return Credentials.from_service_account_info(info, scopes=SCOPES)
 
-    # Preferred on Railway when you want the whole key: base64-encoded JSON.
     raw_b64 = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON_B64")
     if raw_b64:
         import binascii
@@ -103,8 +150,6 @@ def _credentials() -> Credentials:
                 f"Decoder said: {exc}"
             ) from exc
         try:
-            # json.loads accepts bytes and auto-detects UTF-8 / UTF-16 / UTF-32,
-            # so encoding mismatches in the source file don't bite us here.
             info = json.loads(decoded_bytes)
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
             preview = decoded_bytes[:80]
@@ -123,7 +168,6 @@ def _credentials() -> Credentials:
             )
         return Credentials.from_service_account_info(info, scopes=SCOPES)
 
-    # Raw JSON in the env var (works if your dashboard doesn't mangle quotes).
     raw_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
     if raw_json:
         try:
@@ -137,7 +181,6 @@ def _credentials() -> Credentials:
             ) from exc
         return Credentials.from_service_account_info(info, scopes=SCOPES)
 
-    # Local development: path to the JSON file.
     creds_path = os.environ.get("GOOGLE_SERVICE_ACCOUNT_FILE")
     if creds_path and Path(creds_path).exists():
         return Credentials.from_service_account_file(creds_path, scopes=SCOPES)
@@ -175,63 +218,123 @@ def _open_or_create_tab(spreadsheet, name: str, header: list[str]):
     return ws
 
 
-def _row_for_paper(p: PaperRow) -> list[str]:
-    def g(k: str) -> str:
-        v = getattr(p, k, "")
-        if hasattr(v, "value"):
-            return v.value
-        return str(v) if v is not None else ""
+def _tab_names() -> dict[str, str]:
+    return {
+        "papers": os.environ.get("PAPERS_SHEET_NAME", "papers"),
+        "tables": os.environ.get("PAPER_TABLES_SHEET_NAME", "paper_tables"),
+        "outcomes": os.environ.get("TABLE_OUTCOMES_SHEET_NAME", "table_outcomes"),
+        "timepoints": os.environ.get("TABLE_TIMEPOINTS_SHEET_NAME", "table_timepoints"),
+        "effects": os.environ.get("EFFECT_SIZES_SHEET_NAME", "effect_sizes"),
+    }
 
-    return [g(c) for c in PAPER_SHEET_COLUMNS]
+
+def _cell(v) -> str:
+    if hasattr(v, "value"):
+        return v.value
+    return str(v) if v is not None else ""
+
+
+def _row_for_paper(p: PaperRow) -> list[str]:
+    return [_cell(getattr(p, c, "")) for c in PAPER_SHEET_COLUMNS]
+
+
+def _row_for_table(t: PaperTable) -> list[str]:
+    return [_cell(getattr(t, c, "")) for c in PAPER_TABLE_SHEET_COLUMNS]
+
+
+def _row_for_outcome(o: TableOutcome) -> list[str]:
+    return [_cell(getattr(o, c, "")) for c in TABLE_OUTCOME_SHEET_COLUMNS]
+
+
+def _row_for_timepoint(tp: TableTimepoint) -> list[str]:
+    return [_cell(getattr(tp, c, "")) for c in TABLE_TIMEPOINT_SHEET_COLUMNS]
 
 
 def _row_for_effect(e: EffectSizeRow) -> list[str]:
     def g(k: str) -> str:
         if k == "es_id":
             return str(e.id or "")
-        v = getattr(e, k, "")
-        if hasattr(v, "value"):
-            return v.value
-        return str(v) if v is not None else ""
-
+        return _cell(getattr(e, k, ""))
     return [g(c) for c in EFFECT_SIZE_SHEET_COLUMNS]
 
 
-def push_to_sheets(papers: Iterable[PaperRow], effect_sizes: Iterable[EffectSizeRow]) -> tuple[int, int]:
-    """Replace the contents of the two tabs with the supplied rows."""
-    sh = _open_sheet()
-    papers_tab = os.environ.get("PAPERS_SHEET_NAME", "papers")
-    effects_tab = os.environ.get("EFFECT_SIZES_SHEET_NAME", "effect_sizes")
+def push_to_sheets(
+    papers: Iterable[PaperRow],
+    effect_sizes: Iterable[EffectSizeRow],
+    tables: Iterable[PaperTable] = (),
+    outcomes: Iterable[TableOutcome] = (),
+    timepoints: Iterable[TableTimepoint] = (),
+) -> tuple[int, int]:
+    """Replace the contents of all five tabs with the supplied rows.
 
-    p_ws = _open_or_create_tab(sh, papers_tab, PAPER_SHEET_COLUMNS)
-    e_ws = _open_or_create_tab(sh, effects_tab, EFFECT_SIZE_SHEET_COLUMNS)
+    Returns (papers_pushed, effect_sizes_pushed) for backwards-compatible
+    logging; tables/outcomes/timepoints counts are logged but not returned.
+    """
+    sh = _open_sheet()
+    names = _tab_names()
+
+    p_ws = _open_or_create_tab(sh, names["papers"], PAPER_SHEET_COLUMNS)
+    t_ws = _open_or_create_tab(sh, names["tables"], PAPER_TABLE_SHEET_COLUMNS)
+    o_ws = _open_or_create_tab(sh, names["outcomes"], TABLE_OUTCOME_SHEET_COLUMNS)
+    tp_ws = _open_or_create_tab(sh, names["timepoints"], TABLE_TIMEPOINT_SHEET_COLUMNS)
+    e_ws = _open_or_create_tab(sh, names["effects"], EFFECT_SIZE_SHEET_COLUMNS)
 
     p_rows = [PAPER_SHEET_COLUMNS] + [_row_for_paper(p) for p in papers]
+    t_rows = [PAPER_TABLE_SHEET_COLUMNS] + [_row_for_table(t) for t in tables]
+    o_rows = [TABLE_OUTCOME_SHEET_COLUMNS] + [_row_for_outcome(o) for o in outcomes]
+    tp_rows = [TABLE_TIMEPOINT_SHEET_COLUMNS] + [_row_for_timepoint(t) for t in timepoints]
     e_rows = [EFFECT_SIZE_SHEET_COLUMNS] + [_row_for_effect(e) for e in effect_sizes]
 
-    p_ws.clear()
-    p_ws.update("A1", p_rows)
-    e_ws.clear()
-    e_ws.update("A1", e_rows)
+    for ws, rows in (
+        (p_ws, p_rows),
+        (t_ws, t_rows),
+        (o_ws, o_rows),
+        (tp_ws, tp_rows),
+        (e_ws, e_rows),
+    ):
+        ws.clear()
+        ws.update("A1", rows)
 
     n_p, n_e = len(p_rows) - 1, len(e_rows) - 1
-    logger.info("Pushed %d papers and %d effect sizes to Sheet", n_p, n_e)
+    logger.info(
+        "Pushed %d papers, %d tables, %d outcomes, %d timepoints, %d effect sizes to Sheet",
+        n_p, len(t_rows) - 1, len(o_rows) - 1, len(tp_rows) - 1, n_e,
+    )
     return n_p, n_e
 
 
-def pull_from_sheets() -> tuple[list[dict[str, str]], list[dict[str, str]]]:
-    """Read the two tabs and return raw row dicts."""
+def pull_from_sheets() -> tuple[
+    list[dict[str, str]],  # papers
+    list[dict[str, str]],  # effects
+    list[dict[str, str]],  # tables
+    list[dict[str, str]],  # outcomes
+    list[dict[str, str]],  # timepoints
+]:
+    """Read all five tabs and return raw row dicts.
+
+    Tables / outcomes / timepoints are returned as empty lists if the tabs
+    don't exist yet (older Sheets won't have them).
+    """
     sh = _open_sheet()
-    papers_tab = os.environ.get("PAPERS_SHEET_NAME", "papers")
-    effects_tab = os.environ.get("EFFECT_SIZES_SHEET_NAME", "effect_sizes")
+    names = _tab_names()
 
-    try:
-        p_ws = sh.worksheet(papers_tab)
-        e_ws = sh.worksheet(effects_tab)
-    except gspread.WorksheetNotFound as exc:
-        raise RuntimeError(f"Sheet tab missing: {exc}") from exc
+    def _read(tab: str, required: bool) -> list[dict[str, str]]:
+        try:
+            ws = sh.worksheet(tab)
+        except gspread.WorksheetNotFound:
+            if required:
+                raise RuntimeError(f"Sheet tab missing: {tab}")
+            return []
+        return ws.get_all_records(default_blank="")
 
-    papers = p_ws.get_all_records(default_blank="")
-    effects = e_ws.get_all_records(default_blank="")
-    logger.info("Pulled %d papers and %d effect sizes from Sheet", len(papers), len(effects))
-    return papers, effects
+    papers = _read(names["papers"], required=True)
+    effects = _read(names["effects"], required=True)
+    tables = _read(names["tables"], required=False)
+    outcomes = _read(names["outcomes"], required=False)
+    timepoints = _read(names["timepoints"], required=False)
+
+    logger.info(
+        "Pulled %d papers, %d tables, %d outcomes, %d timepoints, %d effect sizes from Sheet",
+        len(papers), len(tables), len(outcomes), len(timepoints), len(effects),
+    )
+    return papers, effects, tables, outcomes, timepoints

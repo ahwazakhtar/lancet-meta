@@ -1,0 +1,154 @@
+{% extends "base.html" %}
+{% block title %}{{ paper.unique_id }} · {{ step_labels[step] }} · Lancet Meta Review{% endblock %}
+{% block content %}
+
+<nav aria-label="breadcrumb">
+  <ul>
+    <li><a href="/">All papers</a></li>
+    <li>{{ paper.unique_id }}</li>
+    <li>{{ step_labels[step] }}</li>
+  </ul>
+</nav>
+
+{% if msg %}<p class="msg-success">{{ msg }}</p>{% endif %}
+{% if err %}<p class="msg-error">{{ err }}</p>{% endif %}
+
+<article>
+  <header>
+    <hgroup>
+      <h2>{{ paper.unique_id }}</h2>
+      {% if paper.title %}
+        <p style="font-size: 1.05rem;">{{ paper.title }}</p>
+      {% endif %}
+      <p>
+        {% if paper.journal %}<span class="muted">{{ paper.journal }} · {{ paper.year }}</span><br>{% endif %}
+        <span class="badge badge-{{ paper.status.value }}">{{ paper.status.value }}</span>
+        {% if paper.needs_reextraction %}<span class="badge badge-reextract">re-extract</span>{% endif %}
+        {% if paper.last_modified_by %}
+          <span class="muted">· last edited by {{ paper.last_modified_by }} at {{ paper.updated_at.strftime("%Y-%m-%d %H:%M UTC") }}</span>
+        {% endif %}
+      </p>
+    </hgroup>
+  </header>
+
+  {# ---- Checkout banner ---- #}
+  <div class="checkout-banner checkout-{% if held_by_me %}mine{% elif paper.checked_out_by %}held{% else %}available{% endif %}">
+    {% if held_by_me %}
+      <div>
+        <strong>You have this paper checked out.</strong>
+        <small class="muted">since {{ paper.checked_out_at.strftime("%Y-%m-%d %H:%M UTC") }}. Walk through the four steps below, then check it back in.</small>
+      </div>
+      <div class="row-actions">
+        <form method="post" action="/papers/{{ paper.unique_id }}/import-from-sheet" style="display:inline"
+              onsubmit="return confirm('Replace this paper\\'s extracted fields and effect sizes with the latest from the Sheet?');">
+          <button type="submit" class="outline">Import this paper from Sheet</button>
+        </form>
+        <form method="post" action="/papers/{{ paper.unique_id }}/checkin" style="display:inline">
+          <input type="hidden" name="next" value="{{ step }}">
+          <button type="submit">Check in</button>
+        </form>
+      </div>
+    {% elif paper.checked_out_by %}
+      <div>
+        <strong>Checked out by {{ paper.checked_out_by }}</strong>
+        <small class="muted">since {{ paper.checked_out_at.strftime("%Y-%m-%d %H:%M UTC") }}. Editing is locked while another reviewer is working on this paper.</small>
+      </div>
+      {% if is_admin %}
+        <div class="row-actions">
+          <form method="post" action="/papers/{{ paper.unique_id }}/checkin" style="display:inline"
+                onsubmit="return confirm('Force-release this checkout? The current holder will lose their lock.');">
+            <input type="hidden" name="next" value="{{ step }}">
+            <button type="submit" class="secondary outline">Force release (admin)</button>
+          </form>
+        </div>
+      {% endif %}
+    {% else %}
+      <div>
+        <strong>Available.</strong>
+        <small class="muted">Check this paper out to start editing.</small>
+      </div>
+      <div class="row-actions">
+        <form method="post" action="/papers/{{ paper.unique_id }}/checkout" style="display:inline">
+          <input type="hidden" name="next" value="{{ step }}">
+          <button type="submit">Check out</button>
+        </form>
+      </div>
+    {% endif %}
+  </div>
+
+  {# ---- Step progress nav ---- #}
+  <nav class="step-nav" aria-label="Review steps">
+    {% for s in step_order %}
+      <a href="/papers/{{ paper.unique_id }}/{{ s }}" class="step-link {% if s == step %}step-active{% endif %}">
+        {{ step_labels[s] }}
+      </a>
+    {% endfor %}
+  </nav>
+</article>
+
+{% block step_content %}{% endblock %}
+
+<style>
+  .step-nav {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem;
+    margin: 1rem -1.6rem -1.4rem;
+    padding: 0.6rem 1.6rem;
+    border-top: 1px solid var(--border-soft);
+    background: #fbfcfd;
+    border-bottom-left-radius: 0.85rem;
+    border-bottom-right-radius: 0.85rem;
+  }
+  .step-link {
+    padding: 0.4rem 0.85rem;
+    border-radius: 0.5rem;
+    font-size: 0.92rem;
+    font-weight: 500;
+    color: var(--text-soft);
+    text-decoration: none;
+  }
+  .step-link:hover { background: var(--brand-soft); color: var(--brand); text-decoration: none; }
+  .step-active {
+    background: var(--brand);
+    color: white;
+  }
+  .step-active:hover { background: var(--brand-hover); color: white; }
+  .md-table-wrap {
+    overflow-x: auto;
+    border: 1px solid var(--border);
+    border-radius: 0.5rem;
+    background: #fcfdff;
+    padding: 0.5rem 0.85rem;
+    max-height: 26rem;
+    overflow-y: auto;
+  }
+  .md-table-wrap table {
+    margin: 0;
+    border: 0;
+    font-size: 0.85rem;
+  }
+  .table-card {
+    border: 1px solid var(--border);
+    border-radius: 0.7rem;
+    padding: 1rem 1.2rem;
+    background: var(--bg-elev);
+    margin-bottom: 1rem;
+  }
+  .table-card-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 0.75rem;
+    margin-bottom: 0.6rem;
+  }
+  .child-card {
+    border: 1px solid var(--border-soft);
+    border-radius: 0.55rem;
+    padding: 0.85rem 1.05rem;
+    margin: 0.6rem 0;
+    background: #fcfdff;
+  }
+</style>
+
+{% endblock %}

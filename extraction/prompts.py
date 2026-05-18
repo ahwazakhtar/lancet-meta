@@ -21,22 +21,16 @@ def _field_table(fields: list[FieldSpec]) -> str:
     return "\n".join(lines)
 
 
-def build_extraction_prompt_with_content(
-    md_content: str, xlsx_entry: Optional[PaperListEntry] = None
-) -> str:
-    """Prompt for direct API calls — embeds the markdown content inline."""
-    return build_extraction_prompt(md_path=None, xlsx_entry=xlsx_entry, md_content=md_content)
-
-
 def build_extraction_prompt(
     md_path: Optional[str],
     xlsx_entry: Optional[PaperListEntry] = None,
-    md_content: Optional[str] = None,
+    table_labels: Optional[list[str]] = None,
 ) -> str:
-    """Prompt sent to the LLM to extract a single paper.
+    """Prompt sent to Claude (via the Agent SDK) to extract a single paper.
 
-    Pass `md_path` for Agent SDK (model reads the file itself).
-    Pass `md_content` for direct API calls (content embedded inline).
+    The agent has Read tool access and reads the preprocessed markdown at
+    `md_path` itself. `table_labels` is the parsed list of `Page N · Table M`
+    labels; we tell the LLM to only return labels from this set.
     """
 
     paper_fields = _field_table(PAPER_FIELDS)
@@ -50,11 +44,23 @@ def build_extraction_prompt(
         "year": NA,
         "journal": NA,
         "...": "all paper-level fields below",
-        "effect_sizes": [
+        "tables_with_effect_sizes": [
             {
-                "outcome_name": NA,
-                "effect_size_raw": NA,
-                "...": "all effect-size fields below",
+                "table_label": "Page N · Table M",
+                "outcomes": [
+                    {"outcome_name": NA, "outcome_domain": NA, "outcome_definition": NA},
+                ],
+                "timepoints": [
+                    {"timepoint_label": NA, "outcome_timeframe_months": NA},
+                ],
+                "estimates": [
+                    {
+                        "outcome_name": "must match one of the outcomes above",
+                        "timepoints": "must match one of the timepoint_labels above",
+                        "effect_size_raw": NA,
+                        "...": "all effect-size fields below",
+                    }
+                ],
             }
         ],
     }
@@ -76,12 +82,21 @@ been hand-curated and should not be re-derived from the PDF.
     else:
         biblio_block = ""
 
-    if md_content is not None:
-        paper_block = f"""# Paper content
+    paper_block = f"Read the pre-processed markdown for the paper at path: `{md_path}`"
 
-{md_content}"""
+    if table_labels:
+        label_lines = "\n".join(f"- {lab}" for lab in table_labels)
+        allowed_labels_block = f"""
+# Allowed table labels
+
+These are the tables that exist in the markdown's `## Tables` section. Every
+`table_label` you return MUST be one of these exact strings — do not invent
+labels, paraphrase, or merge tables.
+
+{label_lines}
+"""
     else:
-        paper_block = f"Read the pre-processed markdown for the paper at path: `{md_path}`"
+        allowed_labels_block = ""
 
     return f"""You are an expert evidence-synthesis assistant extracting structured data
 from a research paper for a Lancet meta-analysis on gun violence interventions.
@@ -91,56 +106,71 @@ from a research paper for a Lancet meta-analysis on gun violence interventions.
 {paper_block}
 
 The markdown contains the paper's full text by page, followed by every table
-extracted from the PDF rendered as a markdown table. Effect sizes will most
-often be in the tables — read them carefully.
-{biblio_block}
+extracted from the PDF rendered as a markdown table.
+{biblio_block}{allowed_labels_block}
 # What to extract
 
 1. **Paper-level fields** that describe the whole paper (design,
    intervention, etc.).
-2. **Effect sizes**: every quantitative estimate of the difference between
-   comparison groups that the paper reports. Look in the tables, then the
-   results text. Effect sizes include: difference in means, regression
-   coefficient, odds ratio, risk ratio, incidence rate ratio, hazard ratio,
-   standardised mean difference, percentage change, beta coefficient, etc.
+
+2. **Tables that contain effect sizes**. For each such table, return:
+   - `table_label`: the exact `Page N · Table M` label from the markdown.
+   - `outcomes`: the list of outcomes the table reports (one entry per
+     distinct outcome — e.g., "homicide rate", "non-fatal shootings").
+   - `timepoints`: the list of timepoints the table reports (e.g.,
+     "baseline", "endline", "12 mo", "1991-2016"). If the table reports a
+     single overall window, return one timepoint for it.
+   - `estimates`: every quantitative estimate the table reports. Each
+     estimate's `outcome_name` MUST match one of the `outcomes` you declared
+     for that table, and its `timepoints` value MUST match one of the
+     `timepoint_label` values you declared.
+
+3. **Effect sizes** include: difference in means, regression coefficient,
+   odds ratio, risk ratio, incidence rate ratio, hazard ratio, standardised
+   mean difference, percentage change, beta coefficient, etc.
 
    **Fallback rule (per the protocol):** if a comparison reports only group
-   means and SDs (no effect size), still record it as an effect-size row and
+   means and SDs (no effect size), still record it as an estimate row and
    fill `group1_mean / group1_sd / group1_n / group2_mean / group2_sd /
    group2_n` instead of the standard effect fields.
 
-# Rules
+# Critical rules
 
+- **Tables only.** If an effect size is reported in the body text but NOT
+  inside any of the labelled tables above, DROP IT. Do not invent a table
+  label, and do not return a `tables_with_effect_sizes` entry for body-text
+  estimates.
 - Only extract what the markdown actually contains. **Do not invent values.**
 - For any field the paper does not provide, use the exact string
   "data not available".
 - Preserve the paper's reported numbers verbatim (don't reformat units,
   recompute, or round).
 - Numeric fields (`effect_value`, `lower_ci`, `upper_ci`, `variance_se`,
-  `outcome_timeframe_months`, `year`) should hold the number as a string when
-  available, else "data not available".
+  `outcome_timeframe_months`, `year`) should hold the number as a string
+  when available, else "data not available".
 - Direction of effect: one of "↓ beneficial", "↑ harmful", "↔ null", or
   "data not available" if direction is unclear.
 - Be exhaustive about effect sizes — papers often have many across tables.
-  Each subgroup × timepoint × outcome combination typically warrants its own
-  row.
+  Each subgroup × timepoint × outcome combination typically warrants its
+  own estimate row.
 
 # Paper-level fields
 
 {paper_fields}
 
-# Effect-size-level fields (one row each)
+# Effect-size-level fields (one row each, inside `estimates`)
 
 {es_fields}
 
 # Output
 
-Respond with a SINGLE JSON object — no markdown fences, no commentary before
-or after, just the JSON — matching this shape:
+Respond with a SINGLE JSON object — no markdown fences, no commentary
+before or after, just the JSON — matching this shape:
 
 {json.dumps(schema_skeleton, indent=2)}
 
-Every paper-level field above must appear as a key, even if the value is
-"data not available". `effect_sizes` is a list (possibly empty if the paper
-truly reports no quantitative comparisons).
+Every paper-level field above must appear as a top-level key, even if the
+value is "data not available". `tables_with_effect_sizes` is a list
+(possibly empty if the paper has no tables that report quantitative
+between-group comparisons).
 """

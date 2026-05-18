@@ -18,8 +18,16 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .paper_list import PaperListEntry, study_id_to_unique_id
-from .prompts import build_extraction_prompt, build_extraction_prompt_with_content
-from .schema import NA, EffectSize, Paper
+from .prompts import build_extraction_prompt
+from .schema import (
+    EffectSize,
+    ExtractedTable,
+    NA,
+    Paper,
+    TableOutcome,
+    TableTimepoint,
+)
+from .tables import ParsedTable, parse_tables_from_path
 
 logger = logging.getLogger(__name__)
 
@@ -70,36 +78,120 @@ def _apply_xlsx_overrides(paper: Paper, entry: Optional[PaperListEntry]) -> Pape
     return paper
 
 
+def _build_outcome(d: Any) -> TableOutcome:
+    if not isinstance(d, dict):
+        return TableOutcome()
+    return TableOutcome(
+        outcome_name=_coerce_value(d.get("outcome_name") or d.get("name")),
+        outcome_domain=_coerce_value(d.get("outcome_domain") or d.get("domain")),
+        outcome_definition=_coerce_value(d.get("outcome_definition") or d.get("definition")),
+    )
+
+
+def _build_timepoint(d: Any) -> TableTimepoint:
+    if not isinstance(d, dict):
+        return TableTimepoint()
+    return TableTimepoint(
+        timepoint_label=_coerce_value(d.get("timepoint_label") or d.get("label")),
+        outcome_timeframe_months=_coerce_value(
+            d.get("outcome_timeframe_months") or d.get("timeframe_months")
+        ),
+    )
+
+
+def _build_estimate(d: Any) -> EffectSize:
+    if not isinstance(d, dict):
+        return EffectSize()
+    return EffectSize(
+        **{name: _coerce_value(d.get(name)) for name in EffectSize.model_fields}
+    )
+
+
 def _parse_paper_payload(
     payload: dict[str, Any],
     source_pdf: str,
     xlsx_entry: Optional[PaperListEntry] = None,
+    parsed_tables: Optional[list[ParsedTable]] = None,
 ) -> Paper:
-    raw_effect_sizes = payload.pop("effect_sizes", []) or []
+    parsed_label_set = {t.label for t in (parsed_tables or [])}
+
+    raw_tables = payload.pop("tables_with_effect_sizes", None) or []
+    # Tolerate older cached extractions that still use the flat `effect_sizes`
+    # shape — wrap them in a single synthetic table so the rest of the
+    # pipeline doesn't need a second code path.
+    legacy_effect_sizes = payload.pop("effect_sizes", None) or []
+
+    tables_extracted: list[ExtractedTable] = []
+    for entry in raw_tables:
+        if not isinstance(entry, dict):
+            continue
+        label = _coerce_value(entry.get("table_label"))
+        if label == NA or not label:
+            continue
+        if parsed_label_set and label not in parsed_label_set:
+            logger.warning(
+                "LLM returned table_label %r that doesn't match a parsed "
+                "table; keeping it but marking as is_manual.",
+                label,
+            )
+        outcomes = [_build_outcome(o) for o in entry.get("outcomes", []) if isinstance(o, dict)]
+        timepoints = [_build_timepoint(t) for t in entry.get("timepoints", []) if isinstance(t, dict)]
+        estimates = [_build_estimate(e) for e in entry.get("estimates", []) if isinstance(e, dict)]
+        tables_extracted.append(ExtractedTable(
+            table_label=label,
+            outcomes=outcomes,
+            timepoints=timepoints,
+            estimates=estimates,
+        ))
+
+    if legacy_effect_sizes and not tables_extracted:
+        # Best-effort upgrade: emit one synthetic table per distinct
+        # outcome_reference so old cached data still loads.
+        groups: dict[str, list[dict]] = {}
+        for es in legacy_effect_sizes:
+            if not isinstance(es, dict):
+                continue
+            label = _coerce_value(es.get("outcome_reference"))
+            groups.setdefault(label if label != NA else "Legacy effect sizes", []).append(es)
+        for label, items in groups.items():
+            outcomes = [
+                TableOutcome(outcome_name=_coerce_value(es.get("outcome_name")))
+                for es in items
+            ]
+            timepoints = [
+                TableTimepoint(timepoint_label=_coerce_value(es.get("timepoints")))
+                for es in items
+            ]
+            estimates = [_build_estimate(es) for es in items]
+            tables_extracted.append(ExtractedTable(
+                table_label=label,
+                outcomes=outcomes,
+                timepoints=timepoints,
+                estimates=estimates,
+            ))
+
     paper_kwargs: dict[str, str] = {"source_pdf": source_pdf}
     for field_name in Paper.model_fields:
-        if field_name in ("source_pdf", "effect_sizes"):
+        if field_name in ("source_pdf", "tables_with_effect_sizes"):
             continue
         paper_kwargs[field_name] = _coerce_value(payload.get(field_name))
 
-    effect_sizes: list[EffectSize] = []
-    for es in raw_effect_sizes:
-        if not isinstance(es, dict):
-            continue
-        es_kwargs = {name: _coerce_value(es.get(name)) for name in EffectSize.model_fields}
-        effect_sizes.append(EffectSize(**es_kwargs))
-
-    paper = Paper(**paper_kwargs, effect_sizes=effect_sizes)
+    paper = Paper(**paper_kwargs, tables_with_effect_sizes=tables_extracted)
     return _apply_xlsx_overrides(paper, xlsx_entry)
 
 
 async def _run_agent(prompt: str, work_dir: Path) -> str:
+    import os
     from claude_agent_sdk import ClaudeAgentOptions, query  # type: ignore
 
     options = ClaudeAgentOptions(
         allowed_tools=["Read", "Bash"],
         cwd=str(work_dir),
         permission_mode="bypassPermissions",
+        # Extraction is the harder reasoning step (which tables, which
+        # outcomes, which timepoints, link estimates to them) — pin Opus
+        # by default. Override with EXTRACT_MODEL.
+        model=os.environ.get("EXTRACT_MODEL", "claude-opus-4-7"),
         system_prompt=(
             "You are a careful evidence-synthesis assistant. You will receive "
             "a path to a markdown file containing a research paper's text and "
@@ -122,52 +214,12 @@ async def _run_agent(prompt: str, work_dir: Path) -> str:
     return "\n".join(parts).strip()
 
 
-async def _run_openai(prompt: str) -> str:
-    import os
-    from openai import AsyncOpenAI
-
-    client = AsyncOpenAI(api_key=os.environ["OPENAI_API_KEY"])
-    model = os.environ.get("OPENAI_MODEL", "gpt-4.1")
-    max_tokens = int(os.environ.get("OPENAI_MAX_TOKENS", "16000"))
-    try:
-        response = await client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0,
-            max_tokens=max_tokens,
-            response_format={"type": "json_object"},
-        )
-    except Exception as exc:  # noqa: BLE001
-        raise ExtractionError(f"OpenAI API call failed (model={model}): {exc}") from exc
-
-    choice = response.choices[0]
-    content = (choice.message.content or "").strip()
-    if not content:
-        raise ExtractionError(
-            f"OpenAI returned empty content (model={model}, "
-            f"finish_reason={choice.finish_reason}). "
-            f"If finish_reason='length', raise OPENAI_MAX_TOKENS. "
-            f"If 'content_filter', the prompt was refused."
-        )
-    if choice.finish_reason == "length":
-        logger.warning(
-            "OpenAI hit max_tokens=%d for this paper; JSON may be truncated.",
-            max_tokens,
-        )
-    return content
-
-
-def _use_openai() -> bool:
-    import os
-    return bool(os.environ.get("OPENAI_API_KEY"))
-
-
 def extract_from_markdown(
     md_path: Path,
     source_pdf: str,
     xlsx_entry: Optional[PaperListEntry] = None,
-) -> Paper:
-    """Extract a single pre-processed markdown into a `Paper`."""
+) -> tuple[Paper, list[ParsedTable]]:
+    """Extract a single pre-processed markdown into a `Paper` plus tables."""
     return asyncio.run(extract_from_markdown_async(md_path, source_pdf, xlsx_entry))
 
 
@@ -175,24 +227,29 @@ async def extract_from_markdown_async(
     md_path: Path,
     source_pdf: str,
     xlsx_entry: Optional[PaperListEntry] = None,
-) -> Paper:
+) -> tuple[Paper, list[ParsedTable]]:
     md_path = md_path.resolve()
     if not md_path.exists():
         raise ExtractionError(f"Markdown does not exist: {md_path}")
 
-    if _use_openai():
-        logger.info("Extracting %s via OpenAI", md_path.name)
-        md_content = md_path.read_text(encoding="utf-8")
-        prompt = build_extraction_prompt_with_content(md_content, xlsx_entry)
-        raw = await _run_openai(prompt)
-    else:
-        logger.info("Extracting %s via Claude Agent SDK", md_path.name)
-        prompt = build_extraction_prompt(md_path.name, xlsx_entry)
-        raw = await _run_agent(prompt, md_path.parent)
+    parsed_tables = parse_tables_from_path(md_path)
+    table_labels = [t.label for t in parsed_tables]
+
+    logger.info("Extracting %s via Claude Agent SDK", md_path.name)
+    prompt = build_extraction_prompt(
+        md_path.name, xlsx_entry, table_labels=table_labels
+    )
+    raw = await _run_agent(prompt, md_path.parent)
     cleaned = _strip_code_fence(raw)
 
     payload = _parse_json_or_fail(cleaned, md_path)
-    return _parse_paper_payload(payload, source_pdf=source_pdf, xlsx_entry=xlsx_entry)
+    paper = _parse_paper_payload(
+        payload,
+        source_pdf=source_pdf,
+        xlsx_entry=xlsx_entry,
+        parsed_tables=parsed_tables,
+    )
+    return paper, parsed_tables
 
 
 def _parse_json_or_fail(cleaned: str, md_path: Path) -> dict:

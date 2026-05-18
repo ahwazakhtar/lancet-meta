@@ -1,0 +1,85 @@
+{% extends "paper_review.html" %}
+{% block step_content %}
+
+<section>
+  <hgroup>
+    <h3>Step 1 — Declare effect-size tables</h3>
+    <p>Mark every table that reports an effect size (means / SDs, IRR, OR, regression coefficient, etc.). Tables you flag here drive the rest of the review flow.</p>
+  </hgroup>
+
+  {% if not tables %}
+    <p class="muted">No tables were parsed out of this paper's markdown. If the paper does contain tables that should be reviewed, add them manually below.</p>
+  {% endif %}
+
+  {% for t in tables %}
+    <article id="t-{{ t.id }}" class="table-card">
+      <div class="table-card-head">
+        <hgroup style="margin: 0;">
+          <h4 style="margin: 0; font-size: 1.05rem;">{{ t.table_label }}</h4>
+          <p style="margin: 0.2rem 0 0;">
+            {% if t.is_effect_size is none %}
+              <span class="badge badge-pending">undecided</span>
+            {% elif t.is_effect_size %}
+              <span class="badge badge-confirmed">effect-size table</span>
+            {% else %}
+              <span class="badge badge-deleted">not effect-size</span>
+            {% endif %}
+            {% if t.is_manual %}<span class="badge badge-modified">manual</span>{% endif %}
+          </p>
+        </hgroup>
+
+        <div class="row-actions">
+          <form method="post" action="/papers/{{ paper.unique_id }}/tables/{{ t.id }}/set-effect-size" style="display:inline">
+            <input type="hidden" name="is_effect_size" value="true">
+            <button type="submit" {% if not can_edit %}disabled{% endif %}
+                    class="{% if t.is_effect_size %}contrast{% else %}outline{% endif %}">
+              Effect-size table
+            </button>
+          </form>
+          <form method="post" action="/papers/{{ paper.unique_id }}/tables/{{ t.id }}/set-effect-size" style="display:inline">
+            <input type="hidden" name="is_effect_size" value="false">
+            <button type="submit" {% if not can_edit %}disabled{% endif %}
+                    class="secondary outline">
+              Not an effect-size table
+            </button>
+          </form>
+          {% if t.is_manual %}
+            <form method="post" action="/papers/{{ paper.unique_id }}/tables/{{ t.id }}/delete" style="display:inline"
+                  onsubmit="return confirm('Delete this manual table?');">
+              <button type="submit" {% if not can_edit %}disabled{% endif %} class="secondary outline">Delete</button>
+            </form>
+          {% endif %}
+        </div>
+      </div>
+
+      {% if t.body_markdown %}
+        <details>
+          <summary>Show table body</summary>
+          <div class="md-table-wrap">
+            <pre style="white-space: pre-wrap; font-size: 0.82rem; margin: 0;">{{ t.body_markdown }}</pre>
+          </div>
+        </details>
+      {% endif %}
+    </article>
+  {% endfor %}
+
+  <details>
+    <summary><strong>Add a table manually</strong></summary>
+    <form method="post" action="/papers/{{ paper.unique_id }}/tables/new">
+      <fieldset {% if not can_edit %}disabled{% endif %}>
+        <label>
+          <span class="field-label">Table label</span>
+          <input type="text" name="table_label" placeholder="e.g. Page 4 · Table 1 (manual)" required>
+        </label>
+        <button type="submit">Add table</button>
+      </fieldset>
+    </form>
+  </details>
+
+  <hr>
+  <p class="row-actions">
+    <a href="/papers/{{ paper.unique_id }}/outcomes" role="button">Next: outcomes →</a>
+  </p>
+</section>
+
+{% endblock %}

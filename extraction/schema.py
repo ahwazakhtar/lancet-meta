@@ -1,19 +1,21 @@
 """
-Data schema for paper-level metadata and per-effect-size rows.
+Data schema for paper-level metadata and the table-scoped extraction.
 
 The field list mirrors the Template sheet in
-`base-data/field and paper list.xlsx`. We split it into two groups:
+`base-data/field and paper list.xlsx`. We split it into:
 
   * Paper-level: applies to the whole paper (one row per paper).
-  * Effect-size-level: one row per effect-size estimate inside the paper.
+  * Effect-size-level: 25 fields describing a single estimate.
 
-Per vision.md, any field that cannot be located in the PDF is recorded as the
-sentinel string "data not available" — never as `None` or invented content.
+Effect sizes are now nested under tables: every estimate must reference one
+of the paper's preprocessed markdown tables. The LLM is instructed to drop
+any estimate reported only in body text (see `prompts.py`).
+
+Per vision.md, any field that cannot be located in the PDF is recorded as
+the sentinel string "data not available" — never as `None` or invented.
 """
 
 from __future__ import annotations
-
-from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -66,11 +68,11 @@ PAPER_FIELDS: list[FieldSpec] = [
 # Effect-size-level fields (one per effect size found in the paper).
 EFFECT_SIZE_FIELDS: list[FieldSpec] = [
     FieldSpec(name="estimation_method", notes="Fixed effect model; negative binomial; difference-in-differences; etc.", example="Negative binomial"),
-    FieldSpec(name="outcome_name", notes="Homicide rate; non-fatal shootings; etc.", example="Homicide rate"),
-    FieldSpec(name="outcome_reference", notes="Table or figure where the estimate appears", example="Table 2"),
+    FieldSpec(name="outcome_name", notes="Must match one of the outcomes declared for this table.", example="Homicide rate"),
+    FieldSpec(name="outcome_reference", notes="Optional: cell / row reference inside the table", example="Row 2"),
     FieldSpec(name="outcome_domain", notes="Mortality; injury; crime; psychosocial; economic", example="Mortality"),
     FieldSpec(name="outcome_definition", notes="Definition / metric, specify unit or formula", example="Deaths / 100 000 pop."),
-    FieldSpec(name="timepoints", notes="Baseline; 12 mo; 24 mo…", example="12 mo"),
+    FieldSpec(name="timepoints", notes="Must match one of the timepoint labels declared for this table.", example="12 mo"),
     FieldSpec(name="effect_size_raw", notes="Effect size as reported in text (e.g. IRR = 0.62)", example="Incidence Rate Ratio = 0.62"),
     FieldSpec(name="ci_or_se_raw", notes="95% CI or SE as reported in text", example="0.45-0.85"),
     FieldSpec(name="p_value", notes="P-value as reported", example="0.003"),
@@ -78,14 +80,12 @@ EFFECT_SIZE_FIELDS: list[FieldSpec] = [
     FieldSpec(name="direction_of_effect", notes="↓ beneficial; ↑ harmful; ↔ null", example="↓ beneficial"),
     FieldSpec(name="subgroups_analyzed", notes="Age, sex, race/ethnicity, deprivation", example="Yes – age & race"),
     FieldSpec(name="effect_heterogeneity", notes="Describe key subgroup findings", example="Larger reduction among 15-24 y males"),
-    # Coded numeric fields (preferred for analysis)
     FieldSpec(name="effect_type_coded", notes="Coded effect type: IRR, OR, RR, beta, DID, SMD, mean diff, etc.", example="IRR"),
     FieldSpec(name="effect_value", notes="Numeric effect value", example="0.62"),
     FieldSpec(name="lower_ci", notes="Numeric lower confidence bound", example="0.45"),
     FieldSpec(name="upper_ci", notes="Numeric upper confidence bound", example="0.85"),
     FieldSpec(name="variance_se", notes="Numeric variance or SE", example="0.040"),
     FieldSpec(name="outcome_timeframe_months", notes="Outcome timeframe in months (numeric)", example="12"),
-    # Fallback when no effect size is reported (per vision.md):
     FieldSpec(name="group1_mean", notes="If no effect size: intervention group mean", example=""),
     FieldSpec(name="group1_sd", notes="If no effect size: intervention group SD", example=""),
     FieldSpec(name="group1_n", notes="If no effect size: intervention group N", example=""),
@@ -97,7 +97,7 @@ EFFECT_SIZE_FIELDS: list[FieldSpec] = [
 
 
 class EffectSize(BaseModel):
-    """Single effect-size row."""
+    """Single effect-size row (one estimate inside a table)."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -129,8 +129,38 @@ class EffectSize(BaseModel):
     effect_size_notes: str = NA
 
 
+class TableOutcome(BaseModel):
+    """One outcome reported in a table (step 2 of the review flow)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    outcome_name: str = NA
+    outcome_domain: str = NA
+    outcome_definition: str = NA
+
+
+class TableTimepoint(BaseModel):
+    """One timepoint (baseline, endline, 12-mo, etc.) reported in a table."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    timepoint_label: str = NA
+    outcome_timeframe_months: str = NA
+
+
+class ExtractedTable(BaseModel):
+    """A markdown table the LLM flagged as containing effect sizes."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    table_label: str  # e.g. "Page 4 · Table 1" — must match a parsed table
+    outcomes: list[TableOutcome] = Field(default_factory=list)
+    timepoints: list[TableTimepoint] = Field(default_factory=list)
+    estimates: list[EffectSize] = Field(default_factory=list)
+
+
 class Paper(BaseModel):
-    """Paper-level metadata plus list of effect sizes."""
+    """Paper-level metadata plus the LLM's table-scoped effect-size extraction."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -169,7 +199,7 @@ class Paper(BaseModel):
     contextual_barriers_facilitators: str = NA
     notes: str = NA
 
-    effect_sizes: list[EffectSize] = Field(default_factory=list)
+    tables_with_effect_sizes: list[ExtractedTable] = Field(default_factory=list)
 
 
 def paper_field_names() -> list[str]:

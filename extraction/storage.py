@@ -7,8 +7,13 @@ authoritative published copy that users sync to.
 
 Tables:
   - papers              one row per paper (paper-level fields)
-  - effect_sizes        many rows per paper (linked by paper.unique_id)
+  - paper_tables        every table parsed from the paper's markdown
+  - table_outcomes      outcomes the reviewer confirms per declared table
+  - table_timepoints    timepoints the reviewer confirms per declared table
+  - effect_sizes        one row per estimate, linked to a (table, outcome,
+                        timepoint) triple via FK columns
   - users               web-app user accounts
+  - audit_log           append-only record of reviewer actions
 """
 
 from __future__ import annotations
@@ -16,12 +21,12 @@ from __future__ import annotations
 import enum
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional
 
 from sqlmodel import Column, Field, JSON, Session, SQLModel, create_engine, select
 
-from .schema import EffectSize as EffectSizeSchema
 from .schema import Paper as PaperSchema
+from .tables import ParsedTable
 
 
 class ReviewStatus(str, enum.Enum):
@@ -82,11 +87,83 @@ class PaperRow(SQLModel, table=True):
     checked_out_at: Optional[datetime] = None
 
 
+class PaperTable(SQLModel, table=True):
+    """Every table parsed out of a paper's preprocessed markdown.
+
+    Step 1 of the review flow: the reviewer flips `is_effect_size` for each
+    table. None means "undecided" (initial state for tables the LLM did not
+    flag); True/False are explicit reviewer decisions.
+    """
+
+    __tablename__ = "paper_tables"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    paper_unique_id: str = Field(index=True)
+    table_label: str
+    page: int = 0
+    table_index: int = 0
+    body_markdown: str = ""
+
+    # None = undecided. True = effect-size table. False = explicitly rejected.
+    is_effect_size: Optional[bool] = Field(default=None)
+
+    # Was this table parsed out of the markdown, or added manually by a
+    # reviewer (in which case body_markdown will be empty)?
+    is_manual: bool = Field(default=False)
+
+    status: ReviewStatus = Field(default=ReviewStatus.pending)
+    last_modified_by: Optional[str] = None
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class TableOutcome(SQLModel, table=True):
+    """Step 2: outcomes the reviewer confirms inside a declared table."""
+
+    __tablename__ = "table_outcomes"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    table_id: int = Field(index=True)
+    paper_unique_id: str = Field(index=True)
+    outcome_name: str = ""
+    outcome_domain: str = ""
+    outcome_definition: str = ""
+    status: ReviewStatus = Field(default=ReviewStatus.pending)
+    reviewer_notes: str = ""
+    last_modified_by: Optional[str] = None
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class TableTimepoint(SQLModel, table=True):
+    """Step 3: timepoints (baseline, endline, 12-mo, etc.) per table."""
+
+    __tablename__ = "table_timepoints"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    table_id: int = Field(index=True)
+    paper_unique_id: str = Field(index=True)
+    timepoint_label: str = ""
+    outcome_timeframe_months: str = ""
+    status: ReviewStatus = Field(default=ReviewStatus.pending)
+    reviewer_notes: str = ""
+    last_modified_by: Optional[str] = None
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
 class EffectSizeRow(SQLModel, table=True):
+    """Step 4: one estimate, linked to a (table, outcome, timepoint) triple.
+
+    FK columns are nullable: existing pre-migration rows and any estimate the
+    LLM couldn't match to a parsed table/outcome/timepoint are stored with
+    None so they're still visible (typically with status=needs_reextraction).
+    """
+
     __tablename__ = "effect_sizes"
 
     id: Optional[int] = Field(default=None, primary_key=True)
     paper_unique_id: str = Field(index=True)
+    table_id: Optional[int] = Field(default=None, index=True)
+    outcome_id: Optional[int] = Field(default=None, index=True)
+    timepoint_id: Optional[int] = Field(default=None, index=True)
 
     estimation_method: str = ""
     outcome_name: str = ""
@@ -144,8 +221,8 @@ class AuditLog(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     when: datetime = Field(default_factory=datetime.utcnow, index=True)
     email: str
-    action: str  # confirm | modify | delete | add | flag_reextract
-    target: str  # "paper:<id>" or "effect_size:<id>"
+    action: str  # confirm | modify | delete | add | flag_reextract | declare_table | ...
+    target: str  # "paper:<id>" or "effect_size:<id>" or "table:<id>" or ...
     payload: dict = Field(default_factory=dict, sa_column=Column(JSON))
 
 
@@ -170,44 +247,160 @@ def get_engine(db_path: str | Path):
         "checked_out_by": "TEXT",
         "checked_out_at": "DATETIME",
     })
+    _ensure_columns(engine, "effect_sizes", {
+        "table_id": "INTEGER",
+        "outcome_id": "INTEGER",
+        "timepoint_id": "INTEGER",
+    })
     return engine
 
 
-def upsert_paper(engine, paper: PaperSchema) -> PaperRow:
-    """Insert or update a paper extraction (replaces effect sizes wholesale)."""
+# ---------------------------------------------------------------------------
+# Upsert from extraction pipeline
+# ---------------------------------------------------------------------------
+
+
+def _wipe_paper_children(session: Session, unique_id: str) -> None:
+    for model in (EffectSizeRow, TableOutcome, TableTimepoint, PaperTable):
+        for row in session.exec(select(model).where(model.paper_unique_id == unique_id)).all():
+            session.delete(row)
+    session.flush()
+
+
+def upsert_paper(
+    engine,
+    paper: PaperSchema,
+    parsed_tables: Optional[list[ParsedTable]] = None,
+) -> PaperRow:
+    """Insert or update a paper extraction (replaces children wholesale).
+
+    `parsed_tables` is the deterministic list of tables parsed from the
+    paper's preprocessed markdown. Every parsed table becomes a PaperTable
+    row (so reviewers can flag/un-flag them); tables the LLM flagged as
+    containing effect sizes get is_effect_size=True and have their outcomes/
+    timepoints/estimates populated.
+    """
+    parsed_tables = parsed_tables or []
+
     with Session(engine) as session:
         existing = session.exec(
             select(PaperRow).where(PaperRow.unique_id == paper.unique_id)
         ).first()
 
-        paper_data = paper.model_dump(exclude={"effect_sizes"})
+        paper_data = paper.model_dump(exclude={"tables_with_effect_sizes"})
         if existing:
             for k, v in paper_data.items():
                 setattr(existing, k, v)
             existing.updated_at = datetime.utcnow()
-            # If a reviewer hasn't touched it yet, keep status=pending; if they
-            # had flagged for re-extraction, reset to pending on re-extract.
             if existing.status == ReviewStatus.needs_reextraction:
                 existing.status = ReviewStatus.pending
                 existing.needs_reextraction = False
             paper_row = existing
             session.add(paper_row)
-            # Wipe and re-insert effect sizes for this paper.
-            old = session.exec(
-                select(EffectSizeRow).where(EffectSizeRow.paper_unique_id == paper.unique_id)
-            ).all()
-            for r in old:
-                session.delete(r)
+            _wipe_paper_children(session, paper.unique_id)
         else:
             paper_row = PaperRow(**paper_data)
             session.add(paper_row)
+            session.flush()
 
-        for es in paper.effect_sizes:
-            session.add(EffectSizeRow(paper_unique_id=paper.unique_id, **es.model_dump()))
+        # Index parsed tables by label so we can attach LLM data.
+        parsed_by_label = {t.label: t for t in parsed_tables}
+        llm_by_label = {t.table_label: t for t in paper.tables_with_effect_sizes}
+
+        # Insert one PaperTable per parsed-table; LLM-flagged ones get
+        # is_effect_size=True.
+        table_id_by_label: dict[str, int] = {}
+        for parsed in parsed_tables:
+            row = PaperTable(
+                paper_unique_id=paper.unique_id,
+                table_label=parsed.label,
+                page=parsed.page,
+                table_index=parsed.table_index,
+                body_markdown=parsed.body_markdown,
+                is_effect_size=True if parsed.label in llm_by_label else None,
+                is_manual=False,
+            )
+            session.add(row)
+            session.flush()
+            table_id_by_label[parsed.label] = row.id  # type: ignore[assignment]
+
+        # Any LLM-returned label that doesn't match a parsed label: create an
+        # is_manual=True placeholder so the data isn't silently dropped.
+        for label, llm_tbl in llm_by_label.items():
+            if label in table_id_by_label:
+                continue
+            row = PaperTable(
+                paper_unique_id=paper.unique_id,
+                table_label=label,
+                page=0,
+                table_index=0,
+                body_markdown="",
+                is_effect_size=True,
+                is_manual=True,
+            )
+            session.add(row)
+            session.flush()
+            table_id_by_label[label] = row.id  # type: ignore[assignment]
+
+        # Populate outcomes, timepoints, and estimates for the LLM-flagged
+        # tables.
+        for label, llm_tbl in llm_by_label.items():
+            table_id = table_id_by_label[label]
+            outcome_id_by_name: dict[str, int] = {}
+            for oc in llm_tbl.outcomes:
+                outcome_row = TableOutcome(
+                    table_id=table_id,
+                    paper_unique_id=paper.unique_id,
+                    outcome_name=oc.outcome_name,
+                    outcome_domain=oc.outcome_domain,
+                    outcome_definition=oc.outcome_definition,
+                )
+                session.add(outcome_row)
+                session.flush()
+                outcome_id_by_name[oc.outcome_name] = outcome_row.id  # type: ignore[assignment]
+
+            tp_id_by_label: dict[str, int] = {}
+            for tp in llm_tbl.timepoints:
+                tp_row = TableTimepoint(
+                    table_id=table_id,
+                    paper_unique_id=paper.unique_id,
+                    timepoint_label=tp.timepoint_label,
+                    outcome_timeframe_months=tp.outcome_timeframe_months,
+                )
+                session.add(tp_row)
+                session.flush()
+                tp_id_by_label[tp.timepoint_label] = tp_row.id  # type: ignore[assignment]
+
+            for est in llm_tbl.estimates:
+                est_data = est.model_dump()
+                matched_outcome = outcome_id_by_name.get(est.outcome_name)
+                matched_timepoint = tp_id_by_label.get(est.timepoints)
+                needs_reextract = (
+                    matched_outcome is None or matched_timepoint is None
+                )
+                es_row = EffectSizeRow(
+                    paper_unique_id=paper.unique_id,
+                    table_id=table_id,
+                    outcome_id=matched_outcome,
+                    timepoint_id=matched_timepoint,
+                    needs_reextraction=needs_reextract,
+                    status=(
+                        ReviewStatus.needs_reextraction
+                        if needs_reextract
+                        else ReviewStatus.pending
+                    ),
+                    **est_data,
+                )
+                session.add(es_row)
 
         session.commit()
         session.refresh(paper_row)
         return paper_row
+
+
+# ---------------------------------------------------------------------------
+# Read helpers
+# ---------------------------------------------------------------------------
 
 
 def list_papers(engine, include_deleted: bool = False) -> list[PaperRow]:
@@ -230,7 +423,48 @@ def list_effect_sizes(engine, paper_unique_id: str) -> list[EffectSizeRow]:
         )
 
 
-def _coerce_status(value: str) -> ReviewStatus:
+def list_paper_tables(engine, paper_unique_id: str) -> list[PaperTable]:
+    with Session(engine) as session:
+        return list(
+            session.exec(
+                select(PaperTable)
+                .where(PaperTable.paper_unique_id == paper_unique_id)
+                .where(PaperTable.status != ReviewStatus.deleted)
+                .order_by(PaperTable.page, PaperTable.table_index, PaperTable.id)
+            )
+        )
+
+
+def list_table_outcomes(engine, table_id: int) -> list[TableOutcome]:
+    with Session(engine) as session:
+        return list(
+            session.exec(
+                select(TableOutcome)
+                .where(TableOutcome.table_id == table_id)
+                .where(TableOutcome.status != ReviewStatus.deleted)
+                .order_by(TableOutcome.id)
+            )
+        )
+
+
+def list_table_timepoints(engine, table_id: int) -> list[TableTimepoint]:
+    with Session(engine) as session:
+        return list(
+            session.exec(
+                select(TableTimepoint)
+                .where(TableTimepoint.table_id == table_id)
+                .where(TableTimepoint.status != ReviewStatus.deleted)
+                .order_by(TableTimepoint.id)
+            )
+        )
+
+
+# ---------------------------------------------------------------------------
+# Sheet round-trip
+# ---------------------------------------------------------------------------
+
+
+def _coerce_status(value) -> ReviewStatus:
     try:
         return ReviewStatus(value)
     except (ValueError, TypeError):
@@ -245,19 +479,40 @@ def _coerce_bool(value) -> bool:
     return str(value).strip().lower() in {"true", "1", "yes", "y"}
 
 
-_NEVER_OVERWRITE = {"id", "checked_out_by", "checked_out_at"}
+def _coerce_optional_bool(value) -> Optional[bool]:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return None
+    s = str(value).strip().lower()
+    if s in {"", "none", "null", "undecided"}:
+        return None
+    if s in {"true", "1", "yes", "y"}:
+        return True
+    if s in {"false", "0", "no", "n"}:
+        return False
+    return None
+
+
+def _coerce_optional_int(value) -> Optional[int]:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+_NEVER_OVERWRITE_PAPER = {"id", "checked_out_by", "checked_out_at"}
 _DATETIME_COLS = {"extracted_at", "updated_at", "checked_out_at"}
 
 
 def _parse_dt(value):
-    """Parse a datetime string from a Sheet row. Returns None on failure so
-    the SQLModel default_factory can take over."""
     if value is None or isinstance(value, datetime):
         return value if isinstance(value, datetime) else None
     s = str(value).strip()
     if not s:
         return None
-    # str(datetime) uses a space separator; fromisoformat in 3.11+ accepts both.
     try:
         return datetime.fromisoformat(s.replace("Z", "+00:00"))
     except (ValueError, TypeError):
@@ -265,7 +520,6 @@ def _parse_dt(value):
 
 
 def _clean_datetime_fields(kwargs: dict) -> dict:
-    """Replace string datetimes with parsed ones; drop unparseable to use defaults."""
     for k in list(kwargs.keys()):
         if k in _DATETIME_COLS:
             parsed = _parse_dt(kwargs[k])
@@ -276,26 +530,58 @@ def _clean_datetime_fields(kwargs: dict) -> dict:
     return kwargs
 
 
-def _paper_kwargs_from_row(row: dict) -> dict:
-    cols = {c.name for c in PaperRow.__table__.columns} - _NEVER_OVERWRITE
+def _kwargs_from_row(row: dict, model, never_overwrite: set[str]) -> dict:
+    cols = {c.name for c in model.__table__.columns} - never_overwrite
     out = {k: row[k] for k in cols if k in row}
-    out["status"] = _coerce_status(row.get("status", "pending"))
-    out["needs_reextraction"] = _coerce_bool(row.get("needs_reextraction"))
+    if "status" in cols:
+        out["status"] = _coerce_status(row.get("status", "pending"))
+    if "needs_reextraction" in cols:
+        out["needs_reextraction"] = _coerce_bool(row.get("needs_reextraction"))
+    if "is_effect_size" in cols:
+        out["is_effect_size"] = _coerce_optional_bool(row.get("is_effect_size"))
+    if "is_manual" in cols:
+        out["is_manual"] = _coerce_bool(row.get("is_manual"))
+    for fk in ("table_id", "outcome_id", "timepoint_id", "page", "table_index"):
+        if fk in cols and fk in row:
+            coerced = _coerce_optional_int(row[fk])
+            if coerced is None and fk in {"page", "table_index"}:
+                out[fk] = 0
+            else:
+                out[fk] = coerced
     return _clean_datetime_fields(out)
+
+
+def _paper_kwargs_from_row(row: dict) -> dict:
+    return _kwargs_from_row(row, PaperRow, _NEVER_OVERWRITE_PAPER)
 
 
 def _effect_kwargs_from_row(row: dict) -> dict:
-    cols = {c.name for c in EffectSizeRow.__table__.columns} - {"id"}
-    out = {k: row[k] for k in cols if k in row}
-    out["status"] = _coerce_status(row.get("status", "pending"))
-    out["needs_reextraction"] = _coerce_bool(row.get("needs_reextraction"))
-    return _clean_datetime_fields(out)
+    return _kwargs_from_row(row, EffectSizeRow, {"id"})
+
+
+def _table_kwargs_from_row(row: dict) -> dict:
+    return _kwargs_from_row(row, PaperTable, {"id"})
+
+
+def _outcome_kwargs_from_row(row: dict) -> dict:
+    return _kwargs_from_row(row, TableOutcome, {"id"})
+
+
+def _timepoint_kwargs_from_row(row: dict) -> dict:
+    return _kwargs_from_row(row, TableTimepoint, {"id"})
+
+
+def _strip_held(rows: list[dict], key: str, held: set[str]) -> list[dict]:
+    return [r for r in rows if (r.get(key) or "").strip() not in held]
 
 
 def import_from_sheet_rows(
     engine,
     paper_rows: list[dict],
     effect_rows: list[dict],
+    table_rows: Optional[list[dict]] = None,
+    outcome_rows: Optional[list[dict]] = None,
+    timepoint_rows: Optional[list[dict]] = None,
     replace: bool = True,
     preserve_checked_out: bool = True,
 ) -> tuple[int, int, list[str]]:
@@ -303,11 +589,14 @@ def import_from_sheet_rows(
 
     With replace=True, the DB is wiped first so it mirrors the Sheet.
     With preserve_checked_out=True, papers currently checked out (and their
-    effect sizes) are kept as-is and skipped in the inbound rows, so a
-    reviewer's in-progress work isn't trashed by a bulk refresh.
+    children) are kept as-is and skipped in the inbound rows.
 
     Returns (papers_imported, effects_imported, skipped_unique_ids).
     """
+    table_rows = table_rows or []
+    outcome_rows = outcome_rows or []
+    timepoint_rows = timepoint_rows or []
+
     with Session(engine) as session:
         held_ids: set[str] = set()
         if preserve_checked_out:
@@ -319,18 +608,16 @@ def import_from_sheet_rows(
             }
 
         if replace:
-            # Delete only the rows we are allowed to replace.
-            for r in session.exec(
-                select(EffectSizeRow).where(EffectSizeRow.paper_unique_id.not_in(held_ids))
-                if held_ids
-                else select(EffectSizeRow)
-            ).all():
-                session.delete(r)
-            for r in session.exec(
-                select(PaperRow).where(PaperRow.unique_id.not_in(held_ids))
-                if held_ids
-                else select(PaperRow)
-            ).all():
+            for model in (EffectSizeRow, TableOutcome, TableTimepoint, PaperTable):
+                stmt = select(model)
+                if held_ids:
+                    stmt = stmt.where(model.paper_unique_id.not_in(held_ids))
+                for r in session.exec(stmt).all():
+                    session.delete(r)
+            stmt = select(PaperRow)
+            if held_ids:
+                stmt = stmt.where(PaperRow.unique_id.not_in(held_ids))
+            for r in session.exec(stmt).all():
                 session.delete(r)
             session.flush()
 
@@ -351,6 +638,46 @@ def import_from_sheet_rows(
             else:
                 session.add(PaperRow(**kwargs))
             n_p += 1
+        session.flush()
+
+        # Tables: their sheet rows carry an `id` we need so children can
+        # reference it. We rewrite IDs on insert and keep an old→new map.
+        table_id_map: dict[int, int] = {}
+        for row in _strip_held(table_rows, "paper_unique_id", held_ids):
+            old_id = _coerce_optional_int(row.get("id"))
+            kwargs = _table_kwargs_from_row(row)
+            kwargs["paper_unique_id"] = (row.get("paper_unique_id") or "").strip()
+            new_row = PaperTable(**kwargs)
+            session.add(new_row)
+            session.flush()
+            if old_id is not None:
+                table_id_map[old_id] = new_row.id  # type: ignore[assignment]
+
+        outcome_id_map: dict[int, int] = {}
+        for row in _strip_held(outcome_rows, "paper_unique_id", held_ids):
+            old_id = _coerce_optional_int(row.get("id"))
+            kwargs = _outcome_kwargs_from_row(row)
+            kwargs["paper_unique_id"] = (row.get("paper_unique_id") or "").strip()
+            old_table_id = _coerce_optional_int(row.get("table_id"))
+            kwargs["table_id"] = table_id_map.get(old_table_id) if old_table_id is not None else None
+            new_row = TableOutcome(**kwargs)
+            session.add(new_row)
+            session.flush()
+            if old_id is not None:
+                outcome_id_map[old_id] = new_row.id  # type: ignore[assignment]
+
+        timepoint_id_map: dict[int, int] = {}
+        for row in _strip_held(timepoint_rows, "paper_unique_id", held_ids):
+            old_id = _coerce_optional_int(row.get("id"))
+            kwargs = _timepoint_kwargs_from_row(row)
+            kwargs["paper_unique_id"] = (row.get("paper_unique_id") or "").strip()
+            old_table_id = _coerce_optional_int(row.get("table_id"))
+            kwargs["table_id"] = table_id_map.get(old_table_id) if old_table_id is not None else None
+            new_row = TableTimepoint(**kwargs)
+            session.add(new_row)
+            session.flush()
+            if old_id is not None:
+                timepoint_id_map[old_id] = new_row.id  # type: ignore[assignment]
 
         n_e = 0
         for row in effect_rows:
@@ -359,6 +686,12 @@ def import_from_sheet_rows(
                 continue
             kwargs = _effect_kwargs_from_row(row)
             kwargs["paper_unique_id"] = paper_uid
+            old_table_id = _coerce_optional_int(row.get("table_id"))
+            old_outcome_id = _coerce_optional_int(row.get("outcome_id"))
+            old_timepoint_id = _coerce_optional_int(row.get("timepoint_id"))
+            kwargs["table_id"] = table_id_map.get(old_table_id) if old_table_id is not None else None
+            kwargs["outcome_id"] = outcome_id_map.get(old_outcome_id) if old_outcome_id is not None else None
+            kwargs["timepoint_id"] = timepoint_id_map.get(old_timepoint_id) if old_timepoint_id is not None else None
             session.add(EffectSizeRow(**kwargs))
             n_e += 1
 
@@ -371,20 +704,37 @@ def import_paper_from_sheet(
     unique_id: str,
     paper_rows: list[dict],
     effect_rows: list[dict],
+    table_rows: Optional[list[dict]] = None,
+    outcome_rows: Optional[list[dict]] = None,
+    timepoint_rows: Optional[list[dict]] = None,
 ) -> tuple[bool, int]:
     """Refresh one paper from the Sheet. Preserves the checkout state.
 
     Returns (paper_found_in_sheet, n_effect_sizes_imported).
     """
-    match = next((p for p in paper_rows if (p.get("unique_id") or "").strip() == unique_id), None)
+    table_rows = table_rows or []
+    outcome_rows = outcome_rows or []
+    timepoint_rows = timepoint_rows or []
+
+    match = next(
+        (p for p in paper_rows if (p.get("unique_id") or "").strip() == unique_id),
+        None,
+    )
     if not match:
         return False, 0
-    matching_effects = [
-        e for e in effect_rows if (e.get("paper_unique_id") or "").strip() == unique_id
-    ]
+
+    def _filter(rows: Iterable[dict]) -> list[dict]:
+        return [r for r in rows if (r.get("paper_unique_id") or "").strip() == unique_id]
+
+    matching_tables = _filter(table_rows)
+    matching_outcomes = _filter(outcome_rows)
+    matching_timepoints = _filter(timepoint_rows)
+    matching_effects = _filter(effect_rows)
 
     with Session(engine) as session:
-        existing = session.exec(select(PaperRow).where(PaperRow.unique_id == unique_id)).first()
+        existing = session.exec(
+            select(PaperRow).where(PaperRow.unique_id == unique_id)
+        ).first()
         held_by = existing.checked_out_by if existing else None
         held_at = existing.checked_out_at if existing else None
 
@@ -393,23 +743,67 @@ def import_paper_from_sheet(
         if existing:
             for k, v in kwargs.items():
                 setattr(existing, k, v)
-            # Preserve checkout
             existing.checked_out_by = held_by
             existing.checked_out_at = held_at
             session.add(existing)
         else:
             session.add(PaperRow(**kwargs))
 
-        # Replace this paper's effect sizes wholesale.
-        for r in session.exec(
-            select(EffectSizeRow).where(EffectSizeRow.paper_unique_id == unique_id)
-        ).all():
-            session.delete(r)
+        # Wipe this paper's children.
+        _wipe_paper_children(session, unique_id)
+        session.flush()
 
+        # Tables.
+        table_id_map: dict[int, int] = {}
+        for row in matching_tables:
+            old_id = _coerce_optional_int(row.get("id"))
+            t_kwargs = _table_kwargs_from_row(row)
+            t_kwargs["paper_unique_id"] = unique_id
+            new_row = PaperTable(**t_kwargs)
+            session.add(new_row)
+            session.flush()
+            if old_id is not None:
+                table_id_map[old_id] = new_row.id  # type: ignore[assignment]
+
+        # Outcomes.
+        outcome_id_map: dict[int, int] = {}
+        for row in matching_outcomes:
+            old_id = _coerce_optional_int(row.get("id"))
+            o_kwargs = _outcome_kwargs_from_row(row)
+            o_kwargs["paper_unique_id"] = unique_id
+            old_table_id = _coerce_optional_int(row.get("table_id"))
+            o_kwargs["table_id"] = table_id_map.get(old_table_id) if old_table_id is not None else None
+            new_row = TableOutcome(**o_kwargs)
+            session.add(new_row)
+            session.flush()
+            if old_id is not None:
+                outcome_id_map[old_id] = new_row.id  # type: ignore[assignment]
+
+        # Timepoints.
+        tp_id_map: dict[int, int] = {}
+        for row in matching_timepoints:
+            old_id = _coerce_optional_int(row.get("id"))
+            tp_kwargs = _timepoint_kwargs_from_row(row)
+            tp_kwargs["paper_unique_id"] = unique_id
+            old_table_id = _coerce_optional_int(row.get("table_id"))
+            tp_kwargs["table_id"] = table_id_map.get(old_table_id) if old_table_id is not None else None
+            new_row = TableTimepoint(**tp_kwargs)
+            session.add(new_row)
+            session.flush()
+            if old_id is not None:
+                tp_id_map[old_id] = new_row.id  # type: ignore[assignment]
+
+        # Estimates.
         n_e = 0
         for row in matching_effects:
             es_kwargs = _effect_kwargs_from_row(row)
             es_kwargs["paper_unique_id"] = unique_id
+            old_table_id = _coerce_optional_int(row.get("table_id"))
+            old_outcome_id = _coerce_optional_int(row.get("outcome_id"))
+            old_timepoint_id = _coerce_optional_int(row.get("timepoint_id"))
+            es_kwargs["table_id"] = table_id_map.get(old_table_id) if old_table_id is not None else None
+            es_kwargs["outcome_id"] = outcome_id_map.get(old_outcome_id) if old_outcome_id is not None else None
+            es_kwargs["timepoint_id"] = tp_id_map.get(old_timepoint_id) if old_timepoint_id is not None else None
             session.add(EffectSizeRow(**es_kwargs))
             n_e += 1
 

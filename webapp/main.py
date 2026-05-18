@@ -4,13 +4,18 @@ FastAPI web app for reviewing extracted effect sizes.
 Sign-in is email-only and exists purely to attribute audit-log entries.
 See `webapp/auth.py`.
 
+The review UI is a 4-step flow per paper:
+
+  1. Tables     — declare which markdown tables contain effect sizes.
+  2. Outcomes   — confirm the outcomes reported in each declared table.
+  3. Timepoints — confirm baseline / endline / etc.
+  4. Estimates  — confirm the actual effect-size estimates.
+
+Paper-level fields are edited on a separate "Info" view.
+
 Run locally:
 
     uvicorn webapp.main:app --reload
-
-Or via the entrypoint script:
-
-    lancet-web
 """
 
 from __future__ import annotations
@@ -36,7 +41,10 @@ from extraction.storage import (
     AuditLog,
     EffectSizeRow,
     PaperRow,
+    PaperTable,
     ReviewStatus,
+    TableOutcome,
+    TableTimepoint,
     User,
     get_engine,
     import_from_sheet_rows,
@@ -47,7 +55,6 @@ from .auth import authenticate, current_email, current_email_optional, require_a
 
 load_dotenv()
 
-# Logs go to stdout so Railway captures them.
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -56,18 +63,21 @@ log = logging.getLogger("webapp")
 
 BASE_DIR = Path(__file__).parent
 
-# One shared engine for the process; SQLite is fine for an internal review tool.
 _DB_PATH = os.environ.get("WEB_DB_PATH", "data/app.db")
 _engine = get_engine(_DB_PATH)
 
 
-def _ensure_bootstrap_admin() -> None:
-    """Make sure ADMIN_BOOTSTRAP_EMAIL exists as an admin.
+STEP_ORDER = ["tables", "outcomes", "timepoints", "estimates"]
+STEP_LABELS = {
+    "info": "Paper info",
+    "tables": "1. Tables",
+    "outcomes": "2. Outcomes",
+    "timepoints": "3. Timepoints",
+    "estimates": "4. Estimates",
+}
 
-    Idempotent: if the email is already a user, promotes them to admin and
-    leaves everything else alone. If not, inserts them. Logs what it did so
-    the Railway logs make it obvious whether the env var is wired up.
-    """
+
+def _ensure_bootstrap_admin() -> None:
     bootstrap = os.environ.get("ADMIN_BOOTSTRAP_EMAIL", "").strip().lower()
     if not bootstrap:
         log.warning("ADMIN_BOOTSTRAP_EMAIL not set; no bootstrap admin will be created.")
@@ -139,6 +149,47 @@ def _require_checkout(request: Request, paper: PaperRow) -> None:
         )
 
 
+def _get_paper_or_404(session: Session, unique_id: str) -> PaperRow:
+    paper = session.exec(select(PaperRow).where(PaperRow.unique_id == unique_id)).first()
+    if not paper:
+        raise HTTPException(404)
+    return paper
+
+
+def _shell_context(request: Request, paper: PaperRow, step: str,
+                    msg: Optional[str], err: Optional[str]) -> dict:
+    me = current_email(request)
+    held_by_me = paper.checked_out_by == me
+    return {
+        "paper": paper,
+        "step": step,
+        "step_labels": STEP_LABELS,
+        "step_order": ["info"] + STEP_ORDER,
+        "display_name": request.session.get("display_name"),
+        "me": me,
+        "held_by_me": held_by_me,
+        "can_edit": held_by_me or _is_admin(request),
+        "is_admin": _is_admin(request),
+        "msg": msg,
+        "err": err,
+    }
+
+
+def _redirect_step(unique_id: str, step: str, msg: Optional[str] = None, err: Optional[str] = None,
+                   anchor: Optional[str] = None) -> RedirectResponse:
+    target = f"/papers/{unique_id}/{step}"
+    qs = []
+    if msg:
+        qs.append(f"msg={msg}")
+    if err:
+        qs.append(f"err={err}")
+    if qs:
+        target = f"{target}?{'&'.join(qs)}"
+    if anchor:
+        target = f"{target}#{anchor}"
+    return RedirectResponse(target, status_code=status.HTTP_303_SEE_OTHER)
+
+
 # ---------------------------------------------------------------------------
 # Sign-in (email only)
 # ---------------------------------------------------------------------------
@@ -159,9 +210,6 @@ def login_submit(
 ):
     user = authenticate(session, email)
     if not user:
-        # Fallback: if the typed email matches ADMIN_BOOTSTRAP_EMAIL, run
-        # the bootstrap on demand. Lets you recover even if the lifespan
-        # hook didn't fire for any reason.
         bootstrap = os.environ.get("ADMIN_BOOTSTRAP_EMAIL", "").strip().lower()
         from .auth import normalize_email
         if bootstrap and normalize_email(email) == bootstrap:
@@ -252,90 +300,46 @@ def index(
 
 
 # ---------------------------------------------------------------------------
-# Paper detail
+# Paper review: entry redirect + checkout/checkin/import
 # ---------------------------------------------------------------------------
 
 
 @app.get("/papers/{unique_id}", response_class=HTMLResponse)
-def paper_detail(
-    request: Request,
-    unique_id: str,
-    msg: Optional[str] = None,
-    err: Optional[str] = None,
-    session: Session = Depends(get_session),
-):
-    me = current_email(request)
-    paper = session.exec(select(PaperRow).where(PaperRow.unique_id == unique_id)).first()
-    if not paper:
-        raise HTTPException(404)
-    effects = list(
-        session.exec(
-            select(EffectSizeRow)
-            .where(EffectSizeRow.paper_unique_id == unique_id)
-            .where(EffectSizeRow.status != ReviewStatus.deleted)
-            .order_by(EffectSizeRow.id)
-        )
+def paper_entry(request: Request, unique_id: str):
+    return RedirectResponse(
+        f"/papers/{unique_id}/tables", status_code=status.HTTP_303_SEE_OTHER
     )
-    held_by_me = paper.checked_out_by == me
-    can_edit = held_by_me or _is_admin(request)
-    return templates.TemplateResponse(
-        request,
-        "paper_detail.html",
-        {
-            "paper": paper,
-            "effects": effects,
-            "paper_fields": _editable_paper_fields(),
-            "effect_fields": _editable_effect_fields(),
-            "statuses": [s.value for s in ReviewStatus],
-            "display_name": request.session.get("display_name"),
-            "me": me,
-            "held_by_me": held_by_me,
-            "can_edit": can_edit,
-            "is_admin": _is_admin(request),
-            "msg": msg,
-            "err": err,
-        },
-    )
-
-
-# ---------------------------------------------------------------------------
-# Paper checkout / check-in / per-paper import
-# ---------------------------------------------------------------------------
 
 
 @app.post("/papers/{unique_id}/checkout")
 def paper_checkout(
     request: Request,
     unique_id: str,
+    next: Optional[str] = Form(None),
     session: Session = Depends(get_session),
 ):
     email = current_email(request)
-    paper = session.exec(select(PaperRow).where(PaperRow.unique_id == unique_id)).first()
-    if not paper:
-        raise HTTPException(404)
+    paper = _get_paper_or_404(session, unique_id)
     if paper.checked_out_by and paper.checked_out_by != email:
-        return RedirectResponse(
-            f"/papers/{unique_id}?err=Already+checked+out+by+{paper.checked_out_by}",
-            status_code=status.HTTP_303_SEE_OTHER,
-        )
+        return _redirect_step(unique_id, next or "tables",
+                              err=f"Already+checked+out+by+{paper.checked_out_by}")
     paper.checked_out_by = email
     paper.checked_out_at = datetime.utcnow()
     _log(session, email, "checkout", f"paper:{paper.id}")
     session.add(paper)
     session.commit()
-    return RedirectResponse(f"/papers/{unique_id}", status_code=status.HTTP_303_SEE_OTHER)
+    return _redirect_step(unique_id, next or "tables")
 
 
 @app.post("/papers/{unique_id}/checkin")
 def paper_checkin(
     request: Request,
     unique_id: str,
+    next: Optional[str] = Form(None),
     session: Session = Depends(get_session),
 ):
     email = current_email(request)
-    paper = session.exec(select(PaperRow).where(PaperRow.unique_id == unique_id)).first()
-    if not paper:
-        raise HTTPException(404)
+    paper = _get_paper_or_404(session, unique_id)
     if paper.checked_out_by != email and not _is_admin(request):
         raise HTTPException(403, "Only the holder or an admin can check this in.")
     was_held_by = paper.checked_out_by
@@ -344,7 +348,7 @@ def paper_checkin(
     _log(session, email, "checkin", f"paper:{paper.id}", {"was_held_by": was_held_by})
     session.add(paper)
     session.commit()
-    return RedirectResponse(f"/papers/{unique_id}", status_code=status.HTTP_303_SEE_OTHER)
+    return _redirect_step(unique_id, next or "tables")
 
 
 @app.post("/papers/{unique_id}/import-from-sheet")
@@ -354,38 +358,44 @@ def paper_import_one(
     session: Session = Depends(get_session),
 ):
     email = current_email(request)
-    paper = session.exec(select(PaperRow).where(PaperRow.unique_id == unique_id)).first()
-    if not paper:
-        raise HTTPException(404)
+    paper = _get_paper_or_404(session, unique_id)
     if paper.checked_out_by != email:
-        return RedirectResponse(
-            f"/papers/{unique_id}?err=Check+out+this+paper+before+importing",
-            status_code=status.HTTP_303_SEE_OTHER,
-        )
+        return _redirect_step(unique_id, "tables", err="Check+out+this+paper+before+importing")
     try:
-        papers, effects = pull_from_sheets()
+        papers, effects, tables, outcomes, timepoints = pull_from_sheets()
     except Exception as exc:  # noqa: BLE001
-        return RedirectResponse(
-            f"/papers/{unique_id}?err={str(exc)[:200]}",
-            status_code=status.HTTP_303_SEE_OTHER,
-        )
-    found, n_e = import_paper_from_sheet(_engine, unique_id, papers, effects)
+        return _redirect_step(unique_id, "tables", err=str(exc)[:200])
+    found, n_e = import_paper_from_sheet(
+        _engine, unique_id, papers, effects,
+        table_rows=tables, outcome_rows=outcomes, timepoint_rows=timepoints,
+    )
     if not found:
-        return RedirectResponse(
-            f"/papers/{unique_id}?err=Paper+not+found+in+Sheet",
-            status_code=status.HTTP_303_SEE_OTHER,
-        )
+        return _redirect_step(unique_id, "tables", err="Paper+not+found+in+Sheet")
     _log(session, email, "import_paper", f"paper:{paper.id}", {"effect_sizes": n_e})
     session.commit()
-    return RedirectResponse(
-        f"/papers/{unique_id}?msg=Refreshed+from+Sheet+(%2B{n_e}+effect+sizes)",
-        status_code=status.HTTP_303_SEE_OTHER,
-    )
+    return _redirect_step(unique_id, "tables", msg=f"Refreshed+from+Sheet+(%2B{n_e}+effect+sizes)")
 
 
 # ---------------------------------------------------------------------------
-# Paper mutations
+# Paper info view (paper-level fields)
 # ---------------------------------------------------------------------------
+
+
+@app.get("/papers/{unique_id}/info", response_class=HTMLResponse)
+def paper_info(
+    request: Request,
+    unique_id: str,
+    msg: Optional[str] = None,
+    err: Optional[str] = None,
+    session: Session = Depends(get_session),
+):
+    current_email(request)
+    paper = _get_paper_or_404(session, unique_id)
+    ctx = _shell_context(request, paper, "info", msg, err)
+    ctx.update({
+        "paper_fields": _editable_paper_fields(),
+    })
+    return templates.TemplateResponse(request, "step_info.html", ctx)
 
 
 @app.post("/papers/{unique_id}/edit")
@@ -396,9 +406,7 @@ async def paper_edit(
 ):
     email = current_email(request)
     form = await request.form()
-    paper = session.exec(select(PaperRow).where(PaperRow.unique_id == unique_id)).first()
-    if not paper:
-        raise HTTPException(404)
+    paper = _get_paper_or_404(session, unique_id)
     _require_checkout(request, paper)
 
     changes: dict[str, dict[str, str]] = {}
@@ -430,7 +438,7 @@ async def paper_edit(
 
     session.add(paper)
     session.commit()
-    return RedirectResponse(f"/papers/{unique_id}", status_code=status.HTTP_303_SEE_OTHER)
+    return _redirect_step(unique_id, "info")
 
 
 @app.post("/papers/{unique_id}/confirm")
@@ -440,9 +448,7 @@ def paper_confirm(
     session: Session = Depends(get_session),
 ):
     email = current_email(request)
-    paper = session.exec(select(PaperRow).where(PaperRow.unique_id == unique_id)).first()
-    if not paper:
-        raise HTTPException(404)
+    paper = _get_paper_or_404(session, unique_id)
     _require_checkout(request, paper)
     paper.status = ReviewStatus.confirmed
     paper.last_modified_by = email
@@ -450,7 +456,7 @@ def paper_confirm(
     _log(session, email, "confirm", f"paper:{paper.id}")
     session.add(paper)
     session.commit()
-    return RedirectResponse(f"/papers/{unique_id}", status_code=status.HTTP_303_SEE_OTHER)
+    return _redirect_step(unique_id, "info")
 
 
 @app.post("/papers/{unique_id}/delete")
@@ -460,9 +466,7 @@ def paper_delete(
     session: Session = Depends(get_session),
 ):
     email = current_email(request)
-    paper = session.exec(select(PaperRow).where(PaperRow.unique_id == unique_id)).first()
-    if not paper:
-        raise HTTPException(404)
+    paper = _get_paper_or_404(session, unique_id)
     _require_checkout(request, paper)
     paper.status = ReviewStatus.deleted
     paper.last_modified_by = email
@@ -474,17 +478,499 @@ def paper_delete(
 
 
 # ---------------------------------------------------------------------------
-# Effect-size mutations
+# Step 1 — Tables
 # ---------------------------------------------------------------------------
 
 
-def _effect_parent(session: Session, es: EffectSizeRow) -> PaperRow:
-    parent = session.exec(
-        select(PaperRow).where(PaperRow.unique_id == es.paper_unique_id)
-    ).first()
-    if not parent:
+def _list_paper_tables(session: Session, unique_id: str) -> list[PaperTable]:
+    return list(
+        session.exec(
+            select(PaperTable)
+            .where(PaperTable.paper_unique_id == unique_id)
+            .where(PaperTable.status != ReviewStatus.deleted)
+            .order_by(PaperTable.page, PaperTable.table_index, PaperTable.id)
+        )
+    )
+
+
+@app.get("/papers/{unique_id}/tables", response_class=HTMLResponse)
+def step_tables(
+    request: Request,
+    unique_id: str,
+    msg: Optional[str] = None,
+    err: Optional[str] = None,
+    session: Session = Depends(get_session),
+):
+    current_email(request)
+    paper = _get_paper_or_404(session, unique_id)
+    tables = _list_paper_tables(session, unique_id)
+    ctx = _shell_context(request, paper, "tables", msg, err)
+    ctx.update({"tables": tables})
+    return templates.TemplateResponse(request, "step_tables.html", ctx)
+
+
+@app.post("/papers/{unique_id}/tables/{table_id}/set-effect-size")
+def table_set_effect_size(
+    request: Request,
+    unique_id: str,
+    table_id: int,
+    is_effect_size: str = Form(...),  # "true" / "false" / "none"
+    session: Session = Depends(get_session),
+):
+    email = current_email(request)
+    paper = _get_paper_or_404(session, unique_id)
+    _require_checkout(request, paper)
+    table = session.get(PaperTable, table_id)
+    if not table or table.paper_unique_id != unique_id:
         raise HTTPException(404)
-    return parent
+    v = is_effect_size.strip().lower()
+    if v == "true":
+        table.is_effect_size = True
+        action = "declare_table"
+    elif v == "false":
+        table.is_effect_size = False
+        action = "undeclare_table"
+    else:
+        table.is_effect_size = None
+        action = "reset_table"
+    table.last_modified_by = email
+    table.updated_at = datetime.utcnow()
+    _log(session, email, action, f"table:{table.id}", {"is_effect_size": table.is_effect_size})
+    session.add(table)
+    session.commit()
+    return _redirect_step(unique_id, "tables", anchor=f"t-{table.id}")
+
+
+@app.post("/papers/{unique_id}/tables/new")
+def table_create_manual(
+    request: Request,
+    unique_id: str,
+    table_label: str = Form(...),
+    session: Session = Depends(get_session),
+):
+    email = current_email(request)
+    paper = _get_paper_or_404(session, unique_id)
+    _require_checkout(request, paper)
+    label = table_label.strip()
+    if not label:
+        return _redirect_step(unique_id, "tables", err="Table+label+required")
+    table = PaperTable(
+        paper_unique_id=unique_id,
+        table_label=label,
+        page=0,
+        table_index=0,
+        body_markdown="",
+        is_effect_size=True,
+        is_manual=True,
+        last_modified_by=email,
+    )
+    session.add(table)
+    session.commit()
+    session.refresh(table)
+    _log(session, email, "add_table_manual", f"table:{table.id}", {"label": label})
+    session.commit()
+    return _redirect_step(unique_id, "tables", anchor=f"t-{table.id}")
+
+
+@app.post("/papers/{unique_id}/tables/{table_id}/delete")
+def table_delete(
+    request: Request,
+    unique_id: str,
+    table_id: int,
+    session: Session = Depends(get_session),
+):
+    email = current_email(request)
+    paper = _get_paper_or_404(session, unique_id)
+    _require_checkout(request, paper)
+    table = session.get(PaperTable, table_id)
+    if not table or table.paper_unique_id != unique_id:
+        raise HTTPException(404)
+    table.status = ReviewStatus.deleted
+    table.last_modified_by = email
+    table.updated_at = datetime.utcnow()
+    _log(session, email, "delete_table", f"table:{table.id}", {"label": table.table_label})
+    session.add(table)
+    session.commit()
+    return _redirect_step(unique_id, "tables")
+
+
+# ---------------------------------------------------------------------------
+# Step 2 — Outcomes
+# ---------------------------------------------------------------------------
+
+
+def _effect_size_tables(session: Session, unique_id: str) -> list[PaperTable]:
+    return list(
+        session.exec(
+            select(PaperTable)
+            .where(PaperTable.paper_unique_id == unique_id)
+            .where(PaperTable.is_effect_size.is_(True))
+            .where(PaperTable.status != ReviewStatus.deleted)
+            .order_by(PaperTable.page, PaperTable.table_index, PaperTable.id)
+        )
+    )
+
+
+def _outcomes_for_tables(session: Session, table_ids: list[int]) -> dict[int, list[TableOutcome]]:
+    if not table_ids:
+        return {}
+    rows = session.exec(
+        select(TableOutcome)
+        .where(TableOutcome.table_id.in_(table_ids))
+        .where(TableOutcome.status != ReviewStatus.deleted)
+        .order_by(TableOutcome.id)
+    )
+    out: dict[int, list[TableOutcome]] = {tid: [] for tid in table_ids}
+    for r in rows:
+        out.setdefault(r.table_id, []).append(r)
+    return out
+
+
+def _timepoints_for_tables(session: Session, table_ids: list[int]) -> dict[int, list[TableTimepoint]]:
+    if not table_ids:
+        return {}
+    rows = session.exec(
+        select(TableTimepoint)
+        .where(TableTimepoint.table_id.in_(table_ids))
+        .where(TableTimepoint.status != ReviewStatus.deleted)
+        .order_by(TableTimepoint.id)
+    )
+    out: dict[int, list[TableTimepoint]] = {tid: [] for tid in table_ids}
+    for r in rows:
+        out.setdefault(r.table_id, []).append(r)
+    return out
+
+
+@app.get("/papers/{unique_id}/outcomes", response_class=HTMLResponse)
+def step_outcomes(
+    request: Request,
+    unique_id: str,
+    msg: Optional[str] = None,
+    err: Optional[str] = None,
+    session: Session = Depends(get_session),
+):
+    current_email(request)
+    paper = _get_paper_or_404(session, unique_id)
+    tables = _effect_size_tables(session, unique_id)
+    table_ids = [t.id for t in tables if t.id is not None]
+    outcomes = _outcomes_for_tables(session, table_ids)
+    ctx = _shell_context(request, paper, "outcomes", msg, err)
+    ctx.update({"tables": tables, "outcomes_by_table": outcomes})
+    return templates.TemplateResponse(request, "step_outcomes.html", ctx)
+
+
+@app.post("/papers/{unique_id}/tables/{table_id}/outcomes/new")
+async def outcome_create(
+    request: Request,
+    unique_id: str,
+    table_id: int,
+    session: Session = Depends(get_session),
+):
+    email = current_email(request)
+    paper = _get_paper_or_404(session, unique_id)
+    _require_checkout(request, paper)
+    form = await request.form()
+    outcome = TableOutcome(
+        table_id=table_id,
+        paper_unique_id=unique_id,
+        outcome_name=str(form.get("outcome_name", "")),
+        outcome_domain=str(form.get("outcome_domain", "")),
+        outcome_definition=str(form.get("outcome_definition", "")),
+        status=ReviewStatus.modified,
+        last_modified_by=email,
+    )
+    session.add(outcome)
+    session.commit()
+    session.refresh(outcome)
+    _log(session, email, "add_outcome", f"outcome:{outcome.id}",
+         {"table_id": table_id, "name": outcome.outcome_name})
+    session.commit()
+    return _redirect_step(unique_id, "outcomes", anchor=f"o-{outcome.id}")
+
+
+@app.post("/outcomes/{outcome_id}/edit")
+async def outcome_edit(
+    request: Request,
+    outcome_id: int,
+    session: Session = Depends(get_session),
+):
+    email = current_email(request)
+    form = await request.form()
+    outcome = session.get(TableOutcome, outcome_id)
+    if not outcome:
+        raise HTTPException(404)
+    paper = _get_paper_or_404(session, outcome.paper_unique_id)
+    _require_checkout(request, paper)
+    changes: dict[str, dict[str, str]] = {}
+    for field in ("outcome_name", "outcome_domain", "outcome_definition", "reviewer_notes"):
+        if field in form:
+            new_val = str(form[field])
+            old_val = getattr(outcome, field, "")
+            if new_val != old_val:
+                changes[field] = {"from": old_val, "to": new_val}
+                setattr(outcome, field, new_val)
+    if changes:
+        outcome.status = ReviewStatus.modified
+        outcome.last_modified_by = email
+        outcome.updated_at = datetime.utcnow()
+        _log(session, email, "modify", f"outcome:{outcome.id}", {"changes": changes})
+    session.add(outcome)
+    session.commit()
+    return _redirect_step(outcome.paper_unique_id, "outcomes", anchor=f"o-{outcome.id}")
+
+
+@app.post("/outcomes/{outcome_id}/confirm")
+def outcome_confirm(
+    request: Request,
+    outcome_id: int,
+    session: Session = Depends(get_session),
+):
+    email = current_email(request)
+    outcome = session.get(TableOutcome, outcome_id)
+    if not outcome:
+        raise HTTPException(404)
+    paper = _get_paper_or_404(session, outcome.paper_unique_id)
+    _require_checkout(request, paper)
+    outcome.status = ReviewStatus.confirmed
+    outcome.last_modified_by = email
+    outcome.updated_at = datetime.utcnow()
+    _log(session, email, "confirm_outcome", f"outcome:{outcome.id}")
+    session.add(outcome)
+    session.commit()
+    return _redirect_step(outcome.paper_unique_id, "outcomes", anchor=f"o-{outcome.id}")
+
+
+@app.post("/outcomes/{outcome_id}/delete")
+def outcome_delete(
+    request: Request,
+    outcome_id: int,
+    session: Session = Depends(get_session),
+):
+    email = current_email(request)
+    outcome = session.get(TableOutcome, outcome_id)
+    if not outcome:
+        raise HTTPException(404)
+    paper = _get_paper_or_404(session, outcome.paper_unique_id)
+    _require_checkout(request, paper)
+    outcome.status = ReviewStatus.deleted
+    outcome.last_modified_by = email
+    outcome.updated_at = datetime.utcnow()
+    _log(session, email, "delete_outcome", f"outcome:{outcome.id}")
+    session.add(outcome)
+    session.commit()
+    return _redirect_step(outcome.paper_unique_id, "outcomes")
+
+
+# ---------------------------------------------------------------------------
+# Step 3 — Timepoints
+# ---------------------------------------------------------------------------
+
+
+@app.get("/papers/{unique_id}/timepoints", response_class=HTMLResponse)
+def step_timepoints(
+    request: Request,
+    unique_id: str,
+    msg: Optional[str] = None,
+    err: Optional[str] = None,
+    session: Session = Depends(get_session),
+):
+    current_email(request)
+    paper = _get_paper_or_404(session, unique_id)
+    tables = _effect_size_tables(session, unique_id)
+    table_ids = [t.id for t in tables if t.id is not None]
+    timepoints = _timepoints_for_tables(session, table_ids)
+    ctx = _shell_context(request, paper, "timepoints", msg, err)
+    ctx.update({"tables": tables, "timepoints_by_table": timepoints})
+    return templates.TemplateResponse(request, "step_timepoints.html", ctx)
+
+
+@app.post("/papers/{unique_id}/tables/{table_id}/timepoints/new")
+async def timepoint_create(
+    request: Request,
+    unique_id: str,
+    table_id: int,
+    session: Session = Depends(get_session),
+):
+    email = current_email(request)
+    paper = _get_paper_or_404(session, unique_id)
+    _require_checkout(request, paper)
+    form = await request.form()
+    tp = TableTimepoint(
+        table_id=table_id,
+        paper_unique_id=unique_id,
+        timepoint_label=str(form.get("timepoint_label", "")),
+        outcome_timeframe_months=str(form.get("outcome_timeframe_months", "")),
+        status=ReviewStatus.modified,
+        last_modified_by=email,
+    )
+    session.add(tp)
+    session.commit()
+    session.refresh(tp)
+    _log(session, email, "add_timepoint", f"timepoint:{tp.id}",
+         {"table_id": table_id, "label": tp.timepoint_label})
+    session.commit()
+    return _redirect_step(unique_id, "timepoints", anchor=f"tp-{tp.id}")
+
+
+@app.post("/timepoints/{tp_id}/edit")
+async def timepoint_edit(
+    request: Request,
+    tp_id: int,
+    session: Session = Depends(get_session),
+):
+    email = current_email(request)
+    form = await request.form()
+    tp = session.get(TableTimepoint, tp_id)
+    if not tp:
+        raise HTTPException(404)
+    paper = _get_paper_or_404(session, tp.paper_unique_id)
+    _require_checkout(request, paper)
+    changes: dict[str, dict[str, str]] = {}
+    for field in ("timepoint_label", "outcome_timeframe_months", "reviewer_notes"):
+        if field in form:
+            new_val = str(form[field])
+            old_val = getattr(tp, field, "")
+            if new_val != old_val:
+                changes[field] = {"from": old_val, "to": new_val}
+                setattr(tp, field, new_val)
+    if changes:
+        tp.status = ReviewStatus.modified
+        tp.last_modified_by = email
+        tp.updated_at = datetime.utcnow()
+        _log(session, email, "modify", f"timepoint:{tp.id}", {"changes": changes})
+    session.add(tp)
+    session.commit()
+    return _redirect_step(tp.paper_unique_id, "timepoints", anchor=f"tp-{tp.id}")
+
+
+@app.post("/timepoints/{tp_id}/confirm")
+def timepoint_confirm(
+    request: Request,
+    tp_id: int,
+    session: Session = Depends(get_session),
+):
+    email = current_email(request)
+    tp = session.get(TableTimepoint, tp_id)
+    if not tp:
+        raise HTTPException(404)
+    paper = _get_paper_or_404(session, tp.paper_unique_id)
+    _require_checkout(request, paper)
+    tp.status = ReviewStatus.confirmed
+    tp.last_modified_by = email
+    tp.updated_at = datetime.utcnow()
+    _log(session, email, "confirm_timepoint", f"timepoint:{tp.id}")
+    session.add(tp)
+    session.commit()
+    return _redirect_step(tp.paper_unique_id, "timepoints", anchor=f"tp-{tp.id}")
+
+
+@app.post("/timepoints/{tp_id}/delete")
+def timepoint_delete(
+    request: Request,
+    tp_id: int,
+    session: Session = Depends(get_session),
+):
+    email = current_email(request)
+    tp = session.get(TableTimepoint, tp_id)
+    if not tp:
+        raise HTTPException(404)
+    paper = _get_paper_or_404(session, tp.paper_unique_id)
+    _require_checkout(request, paper)
+    tp.status = ReviewStatus.deleted
+    tp.last_modified_by = email
+    tp.updated_at = datetime.utcnow()
+    _log(session, email, "delete_timepoint", f"timepoint:{tp.id}")
+    session.add(tp)
+    session.commit()
+    return _redirect_step(tp.paper_unique_id, "timepoints")
+
+
+# ---------------------------------------------------------------------------
+# Step 4 — Estimates
+# ---------------------------------------------------------------------------
+
+
+@app.get("/papers/{unique_id}/estimates", response_class=HTMLResponse)
+def step_estimates(
+    request: Request,
+    unique_id: str,
+    msg: Optional[str] = None,
+    err: Optional[str] = None,
+    session: Session = Depends(get_session),
+):
+    current_email(request)
+    paper = _get_paper_or_404(session, unique_id)
+    tables = _effect_size_tables(session, unique_id)
+    table_ids = [t.id for t in tables if t.id is not None]
+    outcomes = _outcomes_for_tables(session, table_ids)
+    timepoints = _timepoints_for_tables(session, table_ids)
+    estimates_by_table: dict[int, list[EffectSizeRow]] = {tid: [] for tid in table_ids}
+    orphan_estimates: list[EffectSizeRow] = []
+    for es in session.exec(
+        select(EffectSizeRow)
+        .where(EffectSizeRow.paper_unique_id == unique_id)
+        .where(EffectSizeRow.status != ReviewStatus.deleted)
+        .order_by(EffectSizeRow.id)
+    ):
+        if es.table_id in estimates_by_table:
+            estimates_by_table[es.table_id].append(es)
+        else:
+            orphan_estimates.append(es)
+
+    ctx = _shell_context(request, paper, "estimates", msg, err)
+    ctx.update({
+        "tables": tables,
+        "outcomes_by_table": outcomes,
+        "timepoints_by_table": timepoints,
+        "estimates_by_table": estimates_by_table,
+        "orphan_estimates": orphan_estimates,
+        "effect_fields": _editable_effect_fields(),
+    })
+    return templates.TemplateResponse(request, "step_estimates.html", ctx)
+
+
+@app.post("/papers/{unique_id}/effect-sizes/new")
+async def effect_create(
+    request: Request,
+    unique_id: str,
+    session: Session = Depends(get_session),
+):
+    email = current_email(request)
+    form = await request.form()
+    paper = _get_paper_or_404(session, unique_id)
+    _require_checkout(request, paper)
+
+    def _opt_int(key: str) -> Optional[int]:
+        raw = form.get(key)
+        if raw is None or str(raw).strip() == "":
+            return None
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return None
+
+    table_id = _opt_int("table_id")
+    outcome_id = _opt_int("outcome_id")
+    timepoint_id = _opt_int("timepoint_id")
+
+    kwargs = {f: str(form.get(f, "")) for f in _editable_effect_fields()}
+    es = EffectSizeRow(
+        paper_unique_id=unique_id,
+        table_id=table_id,
+        outcome_id=outcome_id,
+        timepoint_id=timepoint_id,
+        status=ReviewStatus.modified,
+        last_modified_by=email,
+        **kwargs,
+    )
+    session.add(es)
+    session.commit()
+    session.refresh(es)
+    _log(session, email, "add", f"effect_size:{es.id}", {
+        "table_id": table_id, "outcome_id": outcome_id, "timepoint_id": timepoint_id,
+    })
+    session.commit()
+    return _redirect_step(unique_id, "estimates", anchor=f"es-{es.id}")
 
 
 @app.post("/effect-sizes/{es_id}/edit")
@@ -498,7 +984,8 @@ async def effect_edit(
     es = session.get(EffectSizeRow, es_id)
     if not es:
         raise HTTPException(404)
-    _require_checkout(request, _effect_parent(session, es))
+    paper = _get_paper_or_404(session, es.paper_unique_id)
+    _require_checkout(request, paper)
 
     changes: dict[str, dict[str, str]] = {}
     for field in _editable_effect_fields():
@@ -508,6 +995,24 @@ async def effect_edit(
             if new_val != old_val:
                 changes[field] = {"from": old_val, "to": new_val}
                 setattr(es, field, new_val)
+
+    # Allow re-linking estimate to a different outcome/timepoint inside the
+    # same table without retyping every field.
+    for fk in ("outcome_id", "timepoint_id"):
+        if fk in form:
+            raw = str(form[fk]).strip()
+            new_val: Optional[int]
+            if raw == "":
+                new_val = None
+            else:
+                try:
+                    new_val = int(raw)
+                except ValueError:
+                    new_val = None
+            old_val = getattr(es, fk)
+            if new_val != old_val:
+                changes[fk] = {"from": old_val, "to": new_val}
+                setattr(es, fk, new_val)
 
     reviewer_notes = form.get("reviewer_notes")
     if reviewer_notes is not None and reviewer_notes != es.reviewer_notes:
@@ -529,9 +1034,7 @@ async def effect_edit(
 
     session.add(es)
     session.commit()
-    return RedirectResponse(
-        f"/papers/{es.paper_unique_id}#es-{es.id}", status_code=status.HTTP_303_SEE_OTHER
-    )
+    return _redirect_step(es.paper_unique_id, "estimates", anchor=f"es-{es.id}")
 
 
 @app.post("/effect-sizes/{es_id}/confirm")
@@ -544,16 +1047,15 @@ def effect_confirm(
     es = session.get(EffectSizeRow, es_id)
     if not es:
         raise HTTPException(404)
-    _require_checkout(request, _effect_parent(session, es))
+    paper = _get_paper_or_404(session, es.paper_unique_id)
+    _require_checkout(request, paper)
     es.status = ReviewStatus.confirmed
     es.last_modified_by = email
     es.updated_at = datetime.utcnow()
     _log(session, email, "confirm", f"effect_size:{es.id}")
     session.add(es)
     session.commit()
-    return RedirectResponse(
-        f"/papers/{es.paper_unique_id}#es-{es.id}", status_code=status.HTTP_303_SEE_OTHER
-    )
+    return _redirect_step(es.paper_unique_id, "estimates", anchor=f"es-{es.id}")
 
 
 @app.post("/effect-sizes/{es_id}/delete")
@@ -566,43 +1068,15 @@ def effect_delete(
     es = session.get(EffectSizeRow, es_id)
     if not es:
         raise HTTPException(404)
-    _require_checkout(request, _effect_parent(session, es))
+    paper = _get_paper_or_404(session, es.paper_unique_id)
+    _require_checkout(request, paper)
     es.status = ReviewStatus.deleted
     es.last_modified_by = email
     es.updated_at = datetime.utcnow()
     _log(session, email, "delete", f"effect_size:{es.id}")
     session.add(es)
     session.commit()
-    return RedirectResponse(
-        f"/papers/{es.paper_unique_id}", status_code=status.HTTP_303_SEE_OTHER
-    )
-
-
-@app.post("/papers/{unique_id}/effect-sizes/new")
-async def effect_create(
-    request: Request,
-    unique_id: str,
-    session: Session = Depends(get_session),
-):
-    email = current_email(request)
-    form = await request.form()
-    paper = session.exec(select(PaperRow).where(PaperRow.unique_id == unique_id)).first()
-    if not paper:
-        raise HTTPException(404)
-    _require_checkout(request, paper)
-    kwargs = {f: str(form.get(f, "")) for f in _editable_effect_fields()}
-    es = EffectSizeRow(
-        paper_unique_id=unique_id,
-        status=ReviewStatus.modified,
-        last_modified_by=email,
-        **kwargs,
-    )
-    session.add(es)
-    session.commit()
-    session.refresh(es)
-    _log(session, email, "add", f"effect_size:{es.id}", {"created": kwargs})
-    session.commit()
-    return RedirectResponse(f"/papers/{unique_id}", status_code=status.HTTP_303_SEE_OTHER)
+    return _redirect_step(es.paper_unique_id, "estimates")
 
 
 @app.post("/effect-sizes/{es_id}/flag-reextract")
@@ -615,7 +1089,8 @@ def effect_flag_reextract(
     es = session.get(EffectSizeRow, es_id)
     if not es:
         raise HTTPException(404)
-    _require_checkout(request, _effect_parent(session, es))
+    paper = _get_paper_or_404(session, es.paper_unique_id)
+    _require_checkout(request, paper)
     es.needs_reextraction = True
     es.status = ReviewStatus.needs_reextraction
     es.last_modified_by = email
@@ -623,9 +1098,7 @@ def effect_flag_reextract(
     _log(session, email, "flag_reextract", f"effect_size:{es.id}")
     session.add(es)
     session.commit()
-    return RedirectResponse(
-        f"/papers/{es.paper_unique_id}#es-{es.id}", status_code=status.HTTP_303_SEE_OTHER
-    )
+    return _redirect_step(es.paper_unique_id, "estimates", anchor=f"es-{es.id}")
 
 
 # ---------------------------------------------------------------------------
@@ -716,16 +1189,14 @@ def refresh_from_sheet(
     next: Optional[str] = Form(None),
     session: Session = Depends(get_session),
 ):
-    """Pull the Sheet and replace all UNLOCKED papers in the local DB.
-
-    Available to any signed-in reviewer (read direction). Papers currently
-    checked out by anyone are skipped to preserve their work.
-    """
+    """Pull the Sheet and replace all UNLOCKED papers in the local DB."""
     actor = current_email(request)
     try:
-        papers, effects = pull_from_sheets()
+        papers, effects, tables, outcomes, timepoints = pull_from_sheets()
         n_p, n_e, skipped = import_from_sheet_rows(
-            _engine, papers, effects, replace=True, preserve_checked_out=True
+            _engine, papers, effects,
+            table_rows=tables, outcome_rows=outcomes, timepoint_rows=timepoints,
+            replace=True, preserve_checked_out=True,
         )
     except Exception as exc:  # noqa: BLE001
         return RedirectResponse(
@@ -757,10 +1228,19 @@ def admin_publish(
         papers = list(
             session.exec(select(PaperRow).where(PaperRow.status != ReviewStatus.deleted))
         )
+        tables = list(
+            session.exec(select(PaperTable).where(PaperTable.status != ReviewStatus.deleted))
+        )
+        outcomes = list(
+            session.exec(select(TableOutcome).where(TableOutcome.status != ReviewStatus.deleted))
+        )
+        timepoints = list(
+            session.exec(select(TableTimepoint).where(TableTimepoint.status != ReviewStatus.deleted))
+        )
         effects = list(
             session.exec(select(EffectSizeRow).where(EffectSizeRow.status != ReviewStatus.deleted))
         )
-        n_p, n_e = push_to_sheets(papers, effects)
+        n_p, n_e = push_to_sheets(papers, effects, tables, outcomes, timepoints)
     except Exception as exc:  # noqa: BLE001
         return RedirectResponse(
             f"/admin?err={str(exc)[:300]}", status_code=status.HTTP_303_SEE_OTHER

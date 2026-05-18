@@ -46,12 +46,12 @@
           <div class="flex-row">
             <strong>{{ es.outcome_name|truncate(80) or "(no outcome)" }} · {{ es.timepoints|truncate(40) }}</strong>
             <span>
-              <span class="badge badge-{{ es.status.value }}">{{ es.status.value }}</span>
+              {% if es.status.value == "modified" %}<span class="badge badge-modified">edited</span>{% endif %}
               {% if es.needs_reextraction %}<span class="badge badge-reextract">re-extract</span>{% endif %}
             </span>
           </div>
 
-          <form method="post" action="/effect-sizes/{{ es.id }}/edit">
+          <form method="post" action="/effect-sizes/{{ es.id }}/edit" data-row-form="edit">
             <fieldset {% if not can_edit %}disabled{% endif %}>
               <div class="field-grid">
                 <label>
@@ -78,7 +78,17 @@
                   <label>
                     <span class="field-label">{{ field.replace("_", " ") }}</span>
                     {% set val = es[field] %}
-                    {% if val and val|length > 80 %}
+                    {% set opts = field_options.get(field) %}
+                    {% if opts %}
+                      <select name="{{ field }}">
+                        {% for o in opts %}
+                          <option value="{{ o }}" {% if val == o %}selected{% endif %}>{{ o }}</option>
+                        {% endfor %}
+                        {% if val and val not in opts %}
+                          <option value="{{ val }}" selected>{{ val }} (current)</option>
+                        {% endif %}
+                      </select>
+                    {% elif val and val|length > 80 %}
                       <textarea name="{{ field }}" rows="2">{{ val }}</textarea>
                     {% else %}
                       <input type="text" name="{{ field }}" value="{{ val or '' }}">
@@ -90,14 +100,11 @@
                 <span class="field-label">Reviewer notes</span>
                 <textarea name="reviewer_notes" rows="2">{{ es.reviewer_notes }}</textarea>
               </label>
-              <label>
-                <input type="checkbox" name="needs_reextraction" {% if es.needs_reextraction %}checked{% endif %}>
-                Needs re-extraction
-              </label>
               <div class="row-actions">
                 <button type="submit">Save edits</button>
-                <button type="submit" formaction="/effect-sizes/{{ es.id }}/confirm" class="contrast">Confirm</button>
-                <button type="submit" formaction="/effect-sizes/{{ es.id }}/flag-reextract" class="secondary outline">Flag re-extract</button>
+                <button type="submit" formaction="/effect-sizes/{{ es.id }}/flag-reextract" class="secondary outline">
+                  {% if es.needs_reextraction %}Unflag re-extract{% else %}Flag re-extract{% endif %}
+                </button>
                 <button type="submit" formaction="/effect-sizes/{{ es.id }}/delete" class="secondary outline"
                         onclick="return confirm('Delete this estimate?');">Delete</button>
               </div>
@@ -134,7 +141,16 @@
                 {% for field in effect_fields %}
                   <label>
                     <span class="field-label">{{ field.replace("_", " ") }}</span>
-                    <input type="text" name="{{ field }}">
+                    {% set opts = field_options.get(field) %}
+                    {% if opts %}
+                      <select name="{{ field }}">
+                        {% for o in opts %}
+                          <option value="{{ o }}">{{ o }}</option>
+                        {% endfor %}
+                      </select>
+                    {% else %}
+                      <input type="text" name="{{ field }}">
+                    {% endif %}
                   </label>
                 {% endfor %}
               </div>
@@ -155,7 +171,7 @@
           <div class="flex-row">
             <strong>{{ es.outcome_name|truncate(80) or "(no outcome)" }}</strong>
             <span>
-              <span class="badge badge-{{ es.status.value }}">{{ es.status.value }}</span>
+              {% if es.status.value == "modified" %}<span class="badge badge-modified">edited</span>{% endif %}
               {% if es.needs_reextraction %}<span class="badge badge-reextract">re-extract</span>{% endif %}
             </span>
           </div>

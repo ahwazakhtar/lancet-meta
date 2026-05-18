@@ -22,6 +22,7 @@
         </div>
         {% if display_name %}
           <div class="nav-right">
+            <a href="/help" class="nav-link">Help</a>
             {% if request.session.get('is_admin') %}
               <a href="/admin" class="nav-link">Admin</a>
             {% endif %}

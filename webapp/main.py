@@ -35,11 +35,12 @@ from fastapi.templating import Jinja2Templates
 from sqlmodel import Session, select
 from starlette.middleware.sessions import SessionMiddleware
 
-from extraction.schema import effect_size_field_names, paper_field_names
+from extraction.schema import FIELD_OPTIONS, effect_size_field_names, paper_field_names
 from extraction.sheets import pull_from_sheets, push_to_sheets
 from extraction.storage import (
     AuditLog,
     EffectSizeRow,
+    PaperReview,
     PaperRow,
     PaperTable,
     ReviewStatus,
@@ -50,6 +51,37 @@ from extraction.storage import (
     import_from_sheet_rows,
     import_paper_from_sheet,
 )
+
+
+MAX_REVIEWERS_PER_PAPER = 2
+
+
+def _reviewers_for(session: Session, unique_id: str) -> list[str]:
+    """Distinct reviewer emails who have marked this paper as reviewed."""
+    rows = session.exec(
+        select(PaperReview.reviewer_email)
+        .where(PaperReview.paper_unique_id == unique_id)
+    )
+    return sorted({r for r in rows})
+
+
+def _record_review(session: Session, unique_id: str, reviewer_email: str) -> bool:
+    """Insert a PaperReview row if this reviewer hasn't completed before.
+
+    Returns True if a new review was recorded, False if it was already there.
+    """
+    existing = session.exec(
+        select(PaperReview)
+        .where(PaperReview.paper_unique_id == unique_id)
+        .where(PaperReview.reviewer_email == reviewer_email)
+    ).first()
+    if existing:
+        return False
+    session.add(PaperReview(
+        paper_unique_id=unique_id,
+        reviewer_email=reviewer_email,
+    ))
+    return True
 
 from .auth import authenticate, current_email, current_email_optional, require_admin
 
@@ -113,6 +145,10 @@ app.add_middleware(
 )
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=BASE_DIR / "templates")
+# Expose field-option dropdowns to every template so step_info and
+# step_estimates can render <select> elements instead of free-text inputs
+# for constrained fields.
+templates.env.globals["field_options"] = FIELD_OPTIONS
 
 
 def get_session() -> Session:
@@ -147,6 +183,21 @@ def _require_checkout(request: Request, paper: PaperRow) -> None:
             status_code=status.HTTP_409_CONFLICT,
             detail=f"Check out this paper before editing. Currently held by: {holder}.",
         )
+
+
+def _require_draft_access(request: Request, paper: PaperRow) -> Optional[RedirectResponse]:
+    """While a paper is checked out, the draft is private to the holder.
+
+    Returns a redirect-to-dashboard if the caller can't access the draft;
+    otherwise None. Admins always see; non-holders are bounced.
+    """
+    me = current_email(request)
+    if paper.checked_out_by and paper.checked_out_by != me and not _is_admin(request):
+        return RedirectResponse(
+            "/?err=Paper+is+being+drafted+by+another+reviewer",
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+    return None
 
 
 def _get_paper_or_404(session: Session, unique_id: str) -> PaperRow:
@@ -208,18 +259,31 @@ def login_submit(
     email: str = Form(...),
     session: Session = Depends(get_session),
 ):
+    from .auth import EMAIL_RE, normalize_email
+
+    norm = normalize_email(email)
+    if not norm or not EMAIL_RE.match(norm):
+        return RedirectResponse(
+            "/login?error=invalid", status_code=status.HTTP_303_SEE_OTHER
+        )
+
     user = authenticate(session, email)
     if not user:
         bootstrap = os.environ.get("ADMIN_BOOTSTRAP_EMAIL", "").strip().lower()
-        from .auth import normalize_email
-        if bootstrap and normalize_email(email) == bootstrap:
+        if bootstrap and norm == bootstrap:
             log.info("Bootstrap fallback at login: creating admin %s", bootstrap)
             _ensure_bootstrap_admin()
             user = authenticate(session, email)
         if not user:
-            return RedirectResponse(
-                "/login?error=unknown", status_code=status.HTTP_303_SEE_OTHER
-            )
+            # Open sign-up: any well-formed email becomes a reviewer.
+            # No password, attribution-only — matches the existing model.
+            display = norm.split("@")[0]
+            user = User(email=norm, display_name=display, is_admin=False)
+            session.add(user)
+            session.commit()
+            session.refresh(user)
+            log.info("Auto-created reviewer on first login: %s", norm)
+
     request.session["email"] = user.email
     request.session["display_name"] = user.display_name or user.email
     request.session["is_admin"] = user.is_admin
@@ -281,12 +345,36 @@ def index(
     ):
         es_counts[row] = es_counts.get(row, 0) + 1
 
+    # Per-paper review progress: distinct reviewer emails that have clicked
+    # Done.
+    review_emails: dict[str, list[str]] = {}
+    for paper_uid, reviewer in session.exec(
+        select(PaperReview.paper_unique_id, PaperReview.reviewer_email)
+    ):
+        review_emails.setdefault(paper_uid, [])
+        if reviewer not in review_emails[paper_uid]:
+            review_emails[paper_uid].append(reviewer)
+
+    # Aggregate re-extract flags from child rows so the dashboard badge
+    # appears whenever a paper has at least one flagged estimate / outcome
+    # / table, not only when the paper-level checkbox was ticked.
+    papers_needing_reextract: set[str] = {
+        row for row in session.exec(
+            select(EffectSizeRow.paper_unique_id)
+            .where(EffectSizeRow.needs_reextraction.is_(True))
+            .where(EffectSizeRow.status != ReviewStatus.deleted)
+        )
+    }
+
     return templates.TemplateResponse(
         request,
         "papers.html",
         {
             "papers": papers,
             "es_counts": es_counts,
+            "review_emails": review_emails,
+            "max_reviewers": MAX_REVIEWERS_PER_PAPER,
+            "papers_needing_reextract": papers_needing_reextract,
             "q": q or "",
             "status_filter": status_filter or "",
             "checkout_filter": checkout_filter or "",
@@ -323,12 +411,77 @@ def paper_checkout(
     if paper.checked_out_by and paper.checked_out_by != email:
         return _redirect_step(unique_id, next or "tables",
                               err=f"Already+checked+out+by+{paper.checked_out_by}")
+    # Dual-review cap: once two distinct reviewers have marked the paper as
+    # reviewed, only those reviewers (or admins) can check it out again.
+    reviewers = _reviewers_for(session, unique_id)
+    if (
+        len(reviewers) >= MAX_REVIEWERS_PER_PAPER
+        and email not in reviewers
+        and not _is_admin(request)
+    ):
+        return RedirectResponse(
+            f"/?err=Paper+already+reviewed+by+2+reviewers+({'+%26+'.join(reviewers)})",
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
     paper.checked_out_by = email
     paper.checked_out_at = datetime.utcnow()
     _log(session, email, "checkout", f"paper:{paper.id}")
     session.add(paper)
     session.commit()
-    return _redirect_step(unique_id, next or "tables")
+    # New checkouts land on Paper Info so reviewers see the bibliographic
+    # context first; from there they can move to Tables / Outcomes / etc.
+    return _redirect_step(unique_id, next or "info")
+
+
+@app.post("/papers/{unique_id}/submit")
+def paper_submit(
+    request: Request,
+    unique_id: str,
+    session: Session = Depends(get_session),
+):
+    """Done: release the lock + record this reviewer as having reviewed.
+
+    Counts toward the 2-reviewer cap. Idempotent — re-clicking Done after
+    a re-checkout doesn't insert a duplicate review. Blocked if any table
+    is still undecided (is_effect_size IS NULL).
+    """
+    email = current_email(request)
+    paper = _get_paper_or_404(session, unique_id)
+    if paper.checked_out_by != email and not _is_admin(request):
+        raise HTTPException(403, "Only the draft owner can submit.")
+
+    # Gate: every parsed table must be classified before submitting.
+    undecided = session.exec(
+        select(PaperTable)
+        .where(PaperTable.paper_unique_id == unique_id)
+        .where(PaperTable.is_effect_size.is_(None))
+        .where(PaperTable.status != ReviewStatus.deleted)
+    ).all()
+    if undecided:
+        labels = ", ".join(t.table_label for t in undecided[:4])
+        more = "" if len(undecided) <= 4 else f"+{len(undecided)-4}+more"
+        return _redirect_step(
+            unique_id, "tables",
+            err=f"Classify+all+tables+before+marking+Done+(undecided:+{labels}{more})",
+        )
+
+    was_held_by = paper.checked_out_by
+    paper.checked_out_by = None
+    paper.checked_out_at = None
+    paper.last_modified_by = email
+    paper.updated_at = datetime.utcnow()
+    recorded = False
+    if was_held_by:
+        recorded = _record_review(session, unique_id, was_held_by)
+    _log(session, email, "submit", f"paper:{paper.id}", {
+        "was_held_by": was_held_by,
+        "review_recorded": recorded,
+    })
+    session.add(paper)
+    session.commit()
+    return RedirectResponse(
+        f"/?msg=Marked+as+reviewed:+{unique_id}", status_code=status.HTTP_303_SEE_OTHER
+    )
 
 
 @app.post("/papers/{unique_id}/checkin")
@@ -338,17 +491,31 @@ def paper_checkin(
     next: Optional[str] = Form(None),
     session: Session = Depends(get_session),
 ):
+    """Release the lock without recording a review.
+
+    Use this when a reviewer checked out by mistake or wants to step away
+    without committing to one of the 2 review slots. Admins can also use
+    this to force-release someone else's checkout.
+    """
     email = current_email(request)
     paper = _get_paper_or_404(session, unique_id)
     if paper.checked_out_by != email and not _is_admin(request):
-        raise HTTPException(403, "Only the holder or an admin can check this in.")
+        raise HTTPException(403, "Only the holder or an admin can release this.")
     was_held_by = paper.checked_out_by
     paper.checked_out_by = None
     paper.checked_out_at = None
     _log(session, email, "checkin", f"paper:{paper.id}", {"was_held_by": was_held_by})
     session.add(paper)
     session.commit()
-    return _redirect_step(unique_id, next or "tables")
+    # Admins force-releasing someone else's draft stay on the paper page so
+    # they can keep working / inspect. The holder goes back to the dashboard
+    # because they intentionally relinquished access.
+    if was_held_by and was_held_by != email:
+        return _redirect_step(unique_id, next or "tables",
+                              msg=f"Released+{was_held_by}'s+checkout")
+    return RedirectResponse(
+        f"/?msg=Released+{unique_id}", status_code=status.HTTP_303_SEE_OTHER
+    )
 
 
 @app.post("/papers/{unique_id}/import-from-sheet")
@@ -391,6 +558,8 @@ def paper_info(
 ):
     current_email(request)
     paper = _get_paper_or_404(session, unique_id)
+    if (blocked := _require_draft_access(request, paper)):
+        return blocked
     ctx = _shell_context(request, paper, "info", msg, err)
     ctx.update({
         "paper_fields": _editable_paper_fields(),
@@ -423,37 +592,12 @@ async def paper_edit(
         changes["reviewer_notes"] = {"from": paper.reviewer_notes, "to": str(reviewer_notes)}
         paper.reviewer_notes = str(reviewer_notes)
 
-    needs_reextraction = bool(form.get("needs_reextraction"))
-    if needs_reextraction != paper.needs_reextraction:
-        changes["needs_reextraction"] = {"from": paper.needs_reextraction, "to": needs_reextraction}
-        paper.needs_reextraction = needs_reextraction
-        if needs_reextraction:
-            paper.status = ReviewStatus.needs_reextraction
-
     if changes:
-        paper.status = ReviewStatus.needs_reextraction if needs_reextraction else ReviewStatus.modified
+        paper.status = ReviewStatus.modified
         paper.last_modified_by = email
         paper.updated_at = datetime.utcnow()
         _log(session, email, "modify", f"paper:{paper.id}", {"changes": changes})
 
-    session.add(paper)
-    session.commit()
-    return _redirect_step(unique_id, "info")
-
-
-@app.post("/papers/{unique_id}/confirm")
-def paper_confirm(
-    request: Request,
-    unique_id: str,
-    session: Session = Depends(get_session),
-):
-    email = current_email(request)
-    paper = _get_paper_or_404(session, unique_id)
-    _require_checkout(request, paper)
-    paper.status = ReviewStatus.confirmed
-    paper.last_modified_by = email
-    paper.updated_at = datetime.utcnow()
-    _log(session, email, "confirm", f"paper:{paper.id}")
     session.add(paper)
     session.commit()
     return _redirect_step(unique_id, "info")
@@ -503,6 +647,8 @@ def step_tables(
 ):
     current_email(request)
     paper = _get_paper_or_404(session, unique_id)
+    if (blocked := _require_draft_access(request, paper)):
+        return blocked
     tables = _list_paper_tables(session, unique_id)
     ctx = _shell_context(request, paper, "tables", msg, err)
     ctx.update({"tables": tables})
@@ -651,11 +797,13 @@ def step_outcomes(
 ):
     current_email(request)
     paper = _get_paper_or_404(session, unique_id)
+    if (blocked := _require_draft_access(request, paper)):
+        return blocked
     tables = _effect_size_tables(session, unique_id)
     table_ids = [t.id for t in tables if t.id is not None]
     outcomes = _outcomes_for_tables(session, table_ids)
     ctx = _shell_context(request, paper, "outcomes", msg, err)
-    ctx.update({"tables": tables, "outcomes_by_table": outcomes})
+    ctx.update({"tables": tables, "outcomes_by_table": outcomes, "show_save_bar": True})
     return templates.TemplateResponse(request, "step_outcomes.html", ctx)
 
 
@@ -719,27 +867,6 @@ async def outcome_edit(
     return _redirect_step(outcome.paper_unique_id, "outcomes", anchor=f"o-{outcome.id}")
 
 
-@app.post("/outcomes/{outcome_id}/confirm")
-def outcome_confirm(
-    request: Request,
-    outcome_id: int,
-    session: Session = Depends(get_session),
-):
-    email = current_email(request)
-    outcome = session.get(TableOutcome, outcome_id)
-    if not outcome:
-        raise HTTPException(404)
-    paper = _get_paper_or_404(session, outcome.paper_unique_id)
-    _require_checkout(request, paper)
-    outcome.status = ReviewStatus.confirmed
-    outcome.last_modified_by = email
-    outcome.updated_at = datetime.utcnow()
-    _log(session, email, "confirm_outcome", f"outcome:{outcome.id}")
-    session.add(outcome)
-    session.commit()
-    return _redirect_step(outcome.paper_unique_id, "outcomes", anchor=f"o-{outcome.id}")
-
-
 @app.post("/outcomes/{outcome_id}/delete")
 def outcome_delete(
     request: Request,
@@ -776,11 +903,13 @@ def step_timepoints(
 ):
     current_email(request)
     paper = _get_paper_or_404(session, unique_id)
+    if (blocked := _require_draft_access(request, paper)):
+        return blocked
     tables = _effect_size_tables(session, unique_id)
     table_ids = [t.id for t in tables if t.id is not None]
     timepoints = _timepoints_for_tables(session, table_ids)
     ctx = _shell_context(request, paper, "timepoints", msg, err)
-    ctx.update({"tables": tables, "timepoints_by_table": timepoints})
+    ctx.update({"tables": tables, "timepoints_by_table": timepoints, "show_save_bar": True})
     return templates.TemplateResponse(request, "step_timepoints.html", ctx)
 
 
@@ -843,27 +972,6 @@ async def timepoint_edit(
     return _redirect_step(tp.paper_unique_id, "timepoints", anchor=f"tp-{tp.id}")
 
 
-@app.post("/timepoints/{tp_id}/confirm")
-def timepoint_confirm(
-    request: Request,
-    tp_id: int,
-    session: Session = Depends(get_session),
-):
-    email = current_email(request)
-    tp = session.get(TableTimepoint, tp_id)
-    if not tp:
-        raise HTTPException(404)
-    paper = _get_paper_or_404(session, tp.paper_unique_id)
-    _require_checkout(request, paper)
-    tp.status = ReviewStatus.confirmed
-    tp.last_modified_by = email
-    tp.updated_at = datetime.utcnow()
-    _log(session, email, "confirm_timepoint", f"timepoint:{tp.id}")
-    session.add(tp)
-    session.commit()
-    return _redirect_step(tp.paper_unique_id, "timepoints", anchor=f"tp-{tp.id}")
-
-
 @app.post("/timepoints/{tp_id}/delete")
 def timepoint_delete(
     request: Request,
@@ -900,6 +1008,8 @@ def step_estimates(
 ):
     current_email(request)
     paper = _get_paper_or_404(session, unique_id)
+    if (blocked := _require_draft_access(request, paper)):
+        return blocked
     tables = _effect_size_tables(session, unique_id)
     table_ids = [t.id for t in tables if t.id is not None]
     outcomes = _outcomes_for_tables(session, table_ids)
@@ -925,6 +1035,7 @@ def step_estimates(
         "estimates_by_table": estimates_by_table,
         "orphan_estimates": orphan_estimates,
         "effect_fields": _editable_effect_fields(),
+        "show_save_bar": True,
     })
     return templates.TemplateResponse(request, "step_estimates.html", ctx)
 
@@ -1019,14 +1130,9 @@ async def effect_edit(
         changes["reviewer_notes"] = {"from": es.reviewer_notes, "to": str(reviewer_notes)}
         es.reviewer_notes = str(reviewer_notes)
 
-    needs_reextraction = bool(form.get("needs_reextraction"))
-    if needs_reextraction != es.needs_reextraction:
-        changes["needs_reextraction"] = {"from": es.needs_reextraction, "to": needs_reextraction}
-        es.needs_reextraction = needs_reextraction
-
     if changes:
         es.status = (
-            ReviewStatus.needs_reextraction if needs_reextraction else ReviewStatus.modified
+            ReviewStatus.needs_reextraction if es.needs_reextraction else ReviewStatus.modified
         )
         es.last_modified_by = email
         es.updated_at = datetime.utcnow()
@@ -1037,25 +1143,6 @@ async def effect_edit(
     return _redirect_step(es.paper_unique_id, "estimates", anchor=f"es-{es.id}")
 
 
-@app.post("/effect-sizes/{es_id}/confirm")
-def effect_confirm(
-    request: Request,
-    es_id: int,
-    session: Session = Depends(get_session),
-):
-    email = current_email(request)
-    es = session.get(EffectSizeRow, es_id)
-    if not es:
-        raise HTTPException(404)
-    paper = _get_paper_or_404(session, es.paper_unique_id)
-    _require_checkout(request, paper)
-    es.status = ReviewStatus.confirmed
-    es.last_modified_by = email
-    es.updated_at = datetime.utcnow()
-    _log(session, email, "confirm", f"effect_size:{es.id}")
-    session.add(es)
-    session.commit()
-    return _redirect_step(es.paper_unique_id, "estimates", anchor=f"es-{es.id}")
 
 
 @app.post("/effect-sizes/{es_id}/delete")
@@ -1079,23 +1166,58 @@ def effect_delete(
     return _redirect_step(es.paper_unique_id, "estimates")
 
 
+@app.post("/papers/{unique_id}/flag-reextract")
+def paper_flag_reextract(
+    request: Request,
+    unique_id: str,
+    session: Session = Depends(get_session),
+):
+    """Toggle the paper-level re-extract flag (set + unset on same button)."""
+    email = current_email(request)
+    paper = _get_paper_or_404(session, unique_id)
+    _require_checkout(request, paper)
+    paper.needs_reextraction = not paper.needs_reextraction
+    paper.status = (
+        ReviewStatus.needs_reextraction if paper.needs_reextraction
+        else ReviewStatus.modified
+    )
+    paper.last_modified_by = email
+    paper.updated_at = datetime.utcnow()
+    _log(
+        session, email,
+        "flag_reextract" if paper.needs_reextraction else "unflag_reextract",
+        f"paper:{paper.id}",
+    )
+    session.add(paper)
+    session.commit()
+    return _redirect_step(unique_id, "info")
+
+
 @app.post("/effect-sizes/{es_id}/flag-reextract")
 def effect_flag_reextract(
     request: Request,
     es_id: int,
     session: Session = Depends(get_session),
 ):
+    """Toggle the per-estimate re-extract flag."""
     email = current_email(request)
     es = session.get(EffectSizeRow, es_id)
     if not es:
         raise HTTPException(404)
     paper = _get_paper_or_404(session, es.paper_unique_id)
     _require_checkout(request, paper)
-    es.needs_reextraction = True
-    es.status = ReviewStatus.needs_reextraction
+    es.needs_reextraction = not es.needs_reextraction
+    es.status = (
+        ReviewStatus.needs_reextraction if es.needs_reextraction
+        else ReviewStatus.modified
+    )
     es.last_modified_by = email
     es.updated_at = datetime.utcnow()
-    _log(session, email, "flag_reextract", f"effect_size:{es.id}")
+    _log(
+        session, email,
+        "flag_reextract" if es.needs_reextraction else "unflag_reextract",
+        f"effect_size:{es.id}",
+    )
     session.add(es)
     session.commit()
     return _redirect_step(es.paper_unique_id, "estimates", anchor=f"es-{es.id}")
@@ -1259,6 +1381,15 @@ def admin_publish(
 # ---------------------------------------------------------------------------
 # Health check (Railway hits this)
 # ---------------------------------------------------------------------------
+
+
+@app.get("/help", response_class=HTMLResponse)
+def help_page(request: Request):
+    return templates.TemplateResponse(
+        request,
+        "help.html",
+        {"display_name": request.session.get("display_name")},
+    )
 
 
 @app.get("/health")

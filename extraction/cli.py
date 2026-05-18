@@ -93,8 +93,11 @@ def preprocess(
     pdf: Optional[Path] = typer.Option(None, help="Single PDF to preprocess; otherwise the whole PDF_DIR."),
     skip_existing: bool = typer.Option(True, help="Skip PDFs whose markdown already exists."),
     limit: Optional[int] = typer.Option(None, help="Process at most N PDFs."),
+    concurrency: int = typer.Option(3, help="Number of PDFs to preprocess in parallel."),
 ) -> None:
     """Convert PDFs into DOI-standardized markdown (text + tables)."""
+    from .preprocess import preprocess_pdf_async
+
     out_dir = _preprocessed_dir()
 
     if pdf is not None:
@@ -107,30 +110,39 @@ def preprocess(
     if limit is not None:
         pdfs = pdfs[:limit]
 
-    console.print(f"Preprocessing [bold]{len(pdfs)}[/bold] PDF(s) -> {out_dir}")
+    console.print(
+        f"Preprocessing [bold]{len(pdfs)}[/bold] PDF(s) -> {out_dir} "
+        f"(concurrency={concurrency})"
+    )
 
-    n_skipped = n_done = n_fail = 0
-    with Progress(SpinnerColumn(), TextColumn("{task.description}"), TimeElapsedColumn(), console=console) as prog:
-        task = prog.add_task("Preprocessing", total=len(pdfs))
-        for p in pdfs:
-            try:
-                result = preprocess_pdf(p, out_dir, skip_existing=skip_existing)
-            except Exception as exc:  # noqa: BLE001
-                prog.console.log(f"[red]FAIL[/red] {p.name}: {exc}")
-                n_fail += 1
-                prog.advance(task)
-                continue
-            doi_repr = result.doi or "(no DOI)"
-            if result.skipped:
-                prog.console.log(f"[dim]skip[/dim] {p.name} (already done -> {result.md_path.name})")
-                n_skipped += 1
-            else:
-                prog.console.log(
-                    f"[green]OK[/green] {p.name} -> {result.md_path.name} "
-                    f"(doi={doi_repr}, pages={result.n_pages}, tables={result.n_tables})"
-                )
-                n_done += 1
-            prog.advance(task)
+    async def _run_all():
+        sem = asyncio.Semaphore(concurrency)
+        n_skipped = n_done = n_fail = 0
+
+        async def _one(p: Path):
+            nonlocal n_skipped, n_done, n_fail
+            async with sem:
+                try:
+                    result = await preprocess_pdf_async(p, out_dir, skip_existing=skip_existing)
+                except Exception as exc:  # noqa: BLE001
+                    console.log(f"[red]FAIL[/red] {p.name}: {exc}")
+                    n_fail += 1
+                    return
+                doi_repr = result.doi or "(no DOI)"
+                if result.skipped:
+                    console.log(f"[dim]skip[/dim] {p.name} (already done -> {result.md_path.name})")
+                    n_skipped += 1
+                else:
+                    console.log(
+                        f"[green]OK[/green] {p.name} -> {result.md_path.name} "
+                        f"(doi={doi_repr}, pages={result.n_pages}, tables={result.n_tables})"
+                    )
+                    n_done += 1
+
+        await asyncio.gather(*[_one(p) for p in pdfs])
+        return n_done, n_skipped, n_fail
+
+    n_done, n_skipped, n_fail = asyncio.run(_run_all())
     console.print(f"[bold]Done.[/bold] preprocessed={n_done}, skipped={n_skipped}, failed={n_fail}")
 
 

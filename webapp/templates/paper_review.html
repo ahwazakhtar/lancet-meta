@@ -22,10 +22,10 @@
       {% endif %}
       <p>
         {% if paper.journal %}<span class="muted">{{ paper.journal }} · {{ paper.year }}</span><br>{% endif %}
-        <span class="badge badge-{{ paper.status.value }}">{{ paper.status.value }}</span>
+        {% if paper.status.value == "modified" %}<span class="badge badge-modified">edited</span>{% endif %}
         {% if paper.needs_reextraction %}<span class="badge badge-reextract">re-extract</span>{% endif %}
         {% if paper.last_modified_by %}
-          <span class="muted">· last edited by {{ paper.last_modified_by }} at {{ paper.updated_at.strftime("%Y-%m-%d %H:%M UTC") }}</span>
+          <span class="muted">last edited by {{ paper.last_modified_by }} at {{ paper.updated_at.strftime("%Y-%m-%d %H:%M UTC") }}</span>
         {% endif %}
       </p>
     </hgroup>
@@ -35,28 +35,33 @@
   <div class="checkout-banner checkout-{% if held_by_me %}mine{% elif paper.checked_out_by %}held{% else %}available{% endif %}">
     {% if held_by_me %}
       <div>
-        <strong>You have this paper checked out.</strong>
-        <small class="muted">since {{ paper.checked_out_at.strftime("%Y-%m-%d %H:%M UTC") }}. Walk through the four steps below, then check it back in.</small>
+        <strong>Your draft.</strong>
+        <small class="muted">Started {{ paper.checked_out_at.strftime("%Y-%m-%d %H:%M UTC") }}. Only you can see this draft. Submit when you're done — that releases it and marks the paper confirmed.</small>
       </div>
       <div class="row-actions">
-        <form method="post" action="/papers/{{ paper.unique_id }}/import-from-sheet" style="display:inline"
-              onsubmit="return confirm('Replace this paper\\'s extracted fields and effect sizes with the latest from the Sheet?');">
-          <button type="submit" class="outline">Import this paper from Sheet</button>
-        </form>
-        <form method="post" action="/papers/{{ paper.unique_id }}/checkin" style="display:inline">
+        <form method="post" action="/papers/{{ paper.unique_id }}/checkin" style="display:inline"
+              onsubmit="return confirm('Release this paper so someone else can review it?\n\nYour edits stay, but you will NOT be recorded as a reviewer. Only click Release if you are not going to work on this paper anymore.');">
           <input type="hidden" name="next" value="{{ step }}">
-          <button type="submit">Check in</button>
+          <button type="submit" class="secondary outline" title="Hand the paper off to another reviewer. Only click if you are done working on it.">Release</button>
+        </form>
+        <form method="post" action="/papers/{{ paper.unique_id }}/submit" style="display:inline"
+              onsubmit="return confirm('Mark this paper as reviewed and release the lock? Counts toward the 2-reviewer cap.');">
+          <button type="submit" class="contrast" title="Mark this paper as reviewed by you (counts toward the 2-reviewer cap).">Done</button>
         </form>
       </div>
+      <small class="muted" style="margin-top:0.4rem;display:block;">
+        <strong>Done</strong> records you as a reviewer (1 of 2 slots).
+        <strong>Release</strong> hands the paper back — only click if you're stepping away from it.
+      </small>
     {% elif paper.checked_out_by %}
       <div>
-        <strong>Checked out by {{ paper.checked_out_by }}</strong>
-        <small class="muted">since {{ paper.checked_out_at.strftime("%Y-%m-%d %H:%M UTC") }}. Editing is locked while another reviewer is working on this paper.</small>
+        <strong>Drafted by {{ paper.checked_out_by }}</strong>
+        <small class="muted">Started {{ paper.checked_out_at.strftime("%Y-%m-%d %H:%M UTC") }}. The draft is private to that reviewer until they submit.</small>
       </div>
       {% if is_admin %}
         <div class="row-actions">
           <form method="post" action="/papers/{{ paper.unique_id }}/checkin" style="display:inline"
-                onsubmit="return confirm('Force-release this checkout? The current holder will lose their lock.');">
+                onsubmit="return confirm('Force-release this draft? The current holder will lose their lock.');">
             <input type="hidden" name="next" value="{{ step }}">
             <button type="submit" class="secondary outline">Force release (admin)</button>
           </form>
@@ -65,7 +70,7 @@
     {% else %}
       <div>
         <strong>Available.</strong>
-        <small class="muted">Check this paper out to start editing.</small>
+        <small class="muted">Check this paper out to start a private draft.</small>
       </div>
       <div class="row-actions">
         <form method="post" action="/papers/{{ paper.unique_id }}/checkout" style="display:inline">
@@ -88,7 +93,61 @@
 
 {% block step_content %}{% endblock %}
 
+{# Sticky save-draft bar — included by step pages with bulk-editable rows.    #}
+{# Pages that want this must mark each row's edit <form> with                  #}
+{#   data-row-form="edit"                                                      #}
+{# and set `show_save_bar = true` in their context.                            #}
+{% if show_save_bar %}
+<div class="save-bar">
+  <span class="save-bar-label">Drafts auto-save per row. Click <strong>Save draft</strong> to apply every change on this page at once.</span>
+  <button type="button" onclick="saveAllRows(this)" {% if not can_edit %}disabled{% endif %}>Save draft</button>
+  <span class="save-bar-status" id="save-bar-status"></span>
+</div>
+<script>
+  async function saveAllRows(btn) {
+    const forms = document.querySelectorAll('form[data-row-form="edit"]');
+    const status = document.getElementById('save-bar-status');
+    if (!forms.length) {
+      status.textContent = 'Nothing to save.';
+      return;
+    }
+    btn.disabled = true;
+    status.textContent = 'Saving ' + forms.length + ' row(s)…';
+    let ok = 0, fail = 0;
+    await Promise.all(Array.from(forms).map(async f => {
+      try {
+        const r = await fetch(f.action, { method: 'POST', body: new FormData(f), credentials: 'same-origin' });
+        if (r.ok || r.status === 303) ok++; else fail++;
+      } catch (e) { fail++; }
+    }));
+    status.textContent = (fail ? '⚠ ' + fail + ' failed · ' : '✓ ') + ok + ' saved';
+    setTimeout(() => window.location.reload(), 600);
+  }
+</script>
+{% endif %}
+
 <style>
+  /* Sticky save-draft bar */
+  .save-bar {
+    position: sticky;
+    top: 0;
+    z-index: 30;
+    display: flex;
+    align-items: center;
+    gap: 0.9rem;
+    flex-wrap: wrap;
+    padding: 0.6rem 1rem;
+    margin: 0.5rem 0 1rem;
+    background: #fffbeb;
+    border: 1px solid #fde68a;
+    border-radius: 0.6rem;
+    box-shadow: 0 2px 6px -3px rgba(15, 23, 42, 0.08);
+    font-size: 0.92rem;
+  }
+  .save-bar-label { flex: 1; color: #92400e; }
+  .save-bar button { margin: 0; }
+  .save-bar-status { font-size: 0.85rem; color: var(--text-soft); min-width: 6rem; }
+
   .step-nav {
     display: flex;
     flex-wrap: wrap;
@@ -100,7 +159,8 @@
     border-bottom-left-radius: 0.85rem;
     border-bottom-right-radius: 0.85rem;
   }
-  .step-link {
+  .step-link,
+  .step-link:visited {
     padding: 0.4rem 0.85rem;
     border-radius: 0.5rem;
     font-size: 0.92rem;
@@ -108,12 +168,23 @@
     color: var(--text-soft);
     text-decoration: none;
   }
-  .step-link:hover { background: var(--brand-soft); color: var(--brand); text-decoration: none; }
-  .step-active {
-    background: var(--brand);
-    color: white;
+  .step-link:hover,
+  .step-link:visited:hover {
+    background: var(--brand-soft);
+    color: var(--brand);
+    text-decoration: none;
   }
-  .step-active:hover { background: var(--brand-hover); color: white; }
+  .step-active,
+  .step-active:visited,
+  .step-active:hover,
+  .step-active:visited:hover {
+    background: var(--brand);
+    color: #ffffff;
+  }
+  .step-active:hover,
+  .step-active:visited:hover {
+    background: var(--brand-hover);
+  }
   .md-table-wrap {
     overflow-x: auto;
     border: 1px solid var(--border);

@@ -24,10 +24,24 @@ html[data-theme="light"] {
   --pico-background-color: var(--bg);
   --pico-primary: var(--brand);
   --pico-primary-hover: var(--brand-hover);
-  --pico-primary-focus: rgba(37, 99, 235, 0.22);
+  --pico-primary-focus: rgba(37, 99, 235, 0.28);
   --pico-primary-background: var(--brand);
   --pico-primary-border: var(--brand);
+  --pico-primary-hover-background: var(--brand-hover);
+  --pico-primary-hover-border: var(--brand-hover);
+  --pico-primary-hover-underline: var(--brand-hover);
   --pico-primary-inverse: #ffffff;
+  /* Pico's contrast button (used for the Submit / Confirm CTAs).
+     Default contrast in light mode resolves to a near-white shade in some
+     setups; lock it to a readable slate. */
+  --pico-contrast: #0f172a;
+  --pico-contrast-background: #0f172a;
+  --pico-contrast-border: #0f172a;
+  --pico-contrast-hover: #1e293b;
+  --pico-contrast-hover-background: #1e293b;
+  --pico-contrast-hover-border: #1e293b;
+  --pico-contrast-inverse: #ffffff;
+  --pico-contrast-focus: rgba(15, 23, 42, 0.28);
   --pico-card-background-color: var(--bg-elev);
   --pico-card-border-color: var(--border);
   --pico-card-sectioning-background-color: transparent;
@@ -235,6 +249,40 @@ button:hover:not(:disabled), [role="button"]:hover {
 }
 
 button:active:not(:disabled) { transform: translateY(0); }
+
+/* Suppress sticky-after-click focus rings (mouse-only), keep an accessible
+   high-contrast ring for keyboard users via :focus-visible. */
+button:focus:not(:focus-visible),
+[role="button"]:focus:not(:focus-visible),
+a[role="button"]:focus:not(:focus-visible) {
+  outline: none;
+  box-shadow: none;
+}
+
+button:focus-visible,
+[role="button"]:focus-visible,
+a[role="button"]:focus-visible {
+  outline: 2px solid #f59e0b;   /* amber — contrasts against blue + white */
+  outline-offset: 2px;
+  box-shadow: none;
+}
+
+/* Anchor-buttons (e.g. "Continue draft") must not flip to the browser's
+   visited-link purple after they've been clicked once. */
+a[role="button"],
+a[role="button"]:visited,
+a[role="button"]:hover,
+a[role="button"]:active {
+  color: var(--pico-primary-inverse);
+}
+a[role="button"].outline,
+a[role="button"].outline:visited,
+a[role="button"].outline:hover {
+  color: var(--text-soft);
+}
+a[role="button"].outline:hover {
+  color: var(--brand);
+}
 
 button.btn-ghost {
   background: transparent;

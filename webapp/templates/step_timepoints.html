@@ -38,9 +38,11 @@
         <div id="tp-{{ tp.id }}" class="child-card">
           <div class="flex-row">
             <strong>{{ tp.timepoint_label or "(no label)" }}</strong>
-            <span><span class="badge badge-{{ tp.status.value }}">{{ tp.status.value }}</span></span>
+            <span>
+              {% if tp.status.value == "modified" %}<span class="badge badge-modified">edited</span>{% endif %}
+            </span>
           </div>
-          <form method="post" action="/timepoints/{{ tp.id }}/edit">
+          <form method="post" action="/timepoints/{{ tp.id }}/edit" data-row-form="edit">
             <fieldset {% if not can_edit %}disabled{% endif %}>
               <div class="field-grid">
                 <label>
@@ -58,7 +60,6 @@
               </label>
               <div class="row-actions">
                 <button type="submit">Save</button>
-                <button type="submit" formaction="/timepoints/{{ tp.id }}/confirm" class="contrast">Confirm</button>
                 <button type="submit" formaction="/timepoints/{{ tp.id }}/delete" class="secondary outline"
                         onclick="return confirm('Delete this timepoint?');">Delete</button>
               </div>

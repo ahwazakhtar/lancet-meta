@@ -1,0 +1,580 @@
+{% extends "base.html" %}
+{% block title %}Help · Lancet Meta Review{% endblock %}
+{% block content %}
+
+<nav aria-label="breadcrumb">
+  <ul>
+    <li><a href="/">Dashboard</a></li>
+    <li>Help</li>
+  </ul>
+</nav>
+
+<article>
+  <header>
+    <hgroup>
+      <h2>How the reviewer app works</h2>
+      <p>End-to-end walkthrough with annotated screenshots. Jump straight to a topic via the index, or read top-to-bottom — it follows the natural review flow.</p>
+    </hgroup>
+  </header>
+
+  <nav class="help-toc" aria-label="Help table of contents">
+    <a href="#signin">1. Sign in</a>
+    <a href="#dashboard">2. Dashboard</a>
+    <a href="#checkout">3. Check out</a>
+    <a href="#info">4. Paper info</a>
+    <a href="#tables">5. Tables</a>
+    <a href="#outcomes">6. Outcomes</a>
+    <a href="#timepoints">7. Timepoints</a>
+    <a href="#estimates">8. Estimates</a>
+    <a href="#saving">9. Saving</a>
+    <a href="#reextract">10. Re-extract flag</a>
+    <a href="#release-done">11. Release vs Done</a>
+    <a href="#dual">12. Dual review</a>
+    <a href="#admin">13. Admin</a>
+  </nav>
+</article>
+
+<!-- ============================================================= -->
+
+<article id="signin">
+  <h3>1 · Sign in</h3>
+  <p>
+    Sign-in is email-only — no password. The first time you sign in with a new email, a reviewer account is created automatically. Your email is recorded against every edit you make for audit attribution.
+  </p>
+
+  <figure class="ui-mockup">
+    <div class="mockup-frame mockup-card">
+      <div class="mockup-hgroup">
+        <div class="mockup-h2">Welcome back</div>
+        <div class="mockup-subtitle">Enter your email to start reviewing.</div>
+      </div>
+      <div class="mockup-field-label">Email</div>
+      <div class="mockup-input">you@example.com</div>
+      <div class="mockup-button mockup-button-primary">Sign in</div>
+      <div class="mockup-subtitle mockup-center">
+        Sign-in is email-only — there's no password.<br>
+        Your email is recorded against every edit for attribution.
+      </div>
+    </div>
+    <figcaption>The login card at <code>/login</code>.</figcaption>
+  </figure>
+</article>
+
+<!-- ============================================================= -->
+
+<article id="dashboard">
+  <h3>2 · Dashboard</h3>
+  <p>
+    The dashboard at <a href="/"><code>/</code></a> lists every paper. Each row shows ID, title, year, intervention, effect-size count, the 2-reviewer progress, current checkout state, and an edit-status indicator.
+  </p>
+
+  <figure class="ui-mockup">
+    <div class="mockup-frame">
+      <table class="mockup-table">
+        <thead><tr>
+          <th>Unique ID</th><th>Title</th><th>Year</th><th>Intervention</th>
+          <th>Effect sizes</th><th>Reviews</th><th>Checked out</th><th>Status</th><th></th>
+        </tr></thead>
+        <tbody>
+          <tr>
+            <td><strong>Azad2020</strong></td>
+            <td>Child Access Prevention Firearm Laws…</td>
+            <td>2020</td><td>Legislation</td>
+            <td>24</td>
+            <td><span class="muted">0 / 2</span></td>
+            <td><span class="muted">—</span></td>
+            <td></td>
+            <td><div class="mockup-button mockup-button-primary mockup-button-sm">Check out</div></td>
+          </tr>
+          <tr>
+            <td><strong>AlexanderAdams2023</strong></td>
+            <td>No Retreat: Stand Your Ground Laws…</td>
+            <td>2022</td><td>Legislation</td>
+            <td>7</td>
+            <td><span class="badge badge-modified" title="alice@x.com">1 / 2</span></td>
+            <td><span class="badge badge-mine">you</span></td>
+            <td><span class="badge badge-modified">edited</span> <span class="badge badge-reextract">re-extract</span></td>
+            <td>
+              <div class="mockup-row-actions">
+                <div class="mockup-button mockup-button-primary mockup-button-sm">Continue draft</div>
+                <div class="mockup-button mockup-button-outline mockup-button-sm">Release</div>
+              </div>
+            </td>
+          </tr>
+          <tr>
+            <td><strong>Anestis2021</strong></td>
+            <td>Lethal-means counseling + cable locks…</td>
+            <td>2021</td><td>Counseling</td>
+            <td>40</td>
+            <td><span class="badge badge-confirmed" title="alice@x.com, bob@x.com">2 / 2</span></td>
+            <td><span class="muted">—</span></td>
+            <td></td>
+            <td><span class="muted">fully reviewed</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <figcaption>Three rows showing the three states: available, your draft (with a flagged estimate so re-extract shows), and fully reviewed.</figcaption>
+  </figure>
+
+  <p>
+    The <strong>re-extract</strong> badge appears if either the paper itself is flagged or <em>any</em> of its estimates is flagged. Use the search bar and dropdowns to filter; click <strong>↻ Refresh from Sheet</strong> (top right) to pull the latest Sheet contents into the local DB (checked-out papers are skipped).
+  </p>
+</article>
+
+<!-- ============================================================= -->
+
+<article id="checkout">
+  <h3>3 · Check out</h3>
+  <p>
+    Clicking <strong>Check out</strong> locks the paper to you. Other reviewers see <span class="muted">locked</span>; admins can still view as read-only. You land on <strong>Paper info</strong> so you have the bibliographic context first.
+  </p>
+
+  <figure class="ui-mockup">
+    <div class="mockup-frame mockup-card">
+      <div class="mockup-h2">AlexanderAdams2023</div>
+      <div class="mockup-subtitle">No Retreat: The Impact of Stand Your Ground Laws on Violent Crime</div>
+      <div class="mockup-subtitle">Journal of Empirical Legal Studies · 2022</div>
+      <div class="mockup-banner mockup-banner-mine">
+        <div>
+          <strong>Your draft.</strong>
+          <small>Started 2026-05-18 20:39 UTC. Only you can see this draft.</small>
+        </div>
+        <div class="mockup-row-actions">
+          <div class="mockup-button mockup-button-outline mockup-button-sm">Release</div>
+          <div class="mockup-button mockup-button-contrast mockup-button-sm">Done</div>
+        </div>
+      </div>
+      <div class="mockup-subtitle"><strong>Done</strong> records you as a reviewer (1 of 2 slots). <strong>Release</strong> hands the paper back — only click if you're stepping away from it.</div>
+      <div class="mockup-step-nav">
+        <span class="mockup-step mockup-step-active">Paper info</span>
+        <span class="mockup-step">1. Tables</span>
+        <span class="mockup-step">2. Outcomes</span>
+        <span class="mockup-step">3. Timepoints</span>
+        <span class="mockup-step">4. Estimates</span>
+      </div>
+    </div>
+    <figcaption>Header + draft banner + step nav for a paper you've checked out.</figcaption>
+  </figure>
+</article>
+
+<!-- ============================================================= -->
+
+<article id="info">
+  <h3>4 · Paper info</h3>
+  <p>
+    Bibliographic and study-level metadata. Free-text fields render as inputs; enum-like fields (publication type, risk-of-bias judgment, setting type, etc.) render as <strong>dropdowns</strong> so you can't accidentally introduce variant spellings.
+  </p>
+  <p>
+    Three actions live at the bottom:
+  </p>
+  <ul>
+    <li><strong>Save paper edits</strong> — persists every field on the page.</li>
+    <li><strong>Flag for re-extraction</strong> (toggles to <strong>Unflag re-extract</strong> when set) — marks the paper for the next extraction pass.</li>
+    <li><strong>Delete</strong> — soft-deletes the paper (hidden from list, excluded from publishes).</li>
+  </ul>
+
+  <figure class="ui-mockup">
+    <div class="mockup-frame">
+      <div class="mockup-field-grid">
+        <div class="mockup-field"><div class="mockup-field-label">design</div><div class="mockup-input mockup-input-small">Interrupted time series</div></div>
+        <div class="mockup-field"><div class="mockup-field-label">publication type</div><div class="mockup-input mockup-input-small">Journal article ▾</div></div>
+        <div class="mockup-field"><div class="mockup-field-label">setting type</div><div class="mockup-input mockup-input-small">Mixed ▾</div></div>
+        <div class="mockup-field"><div class="mockup-field-label">rob judgment</div><div class="mockup-input mockup-input-small">Moderate ▾</div></div>
+      </div>
+      <div class="mockup-row-actions" style="margin-top:0.75rem;">
+        <div class="mockup-button mockup-button-primary mockup-button-sm">Save paper edits</div>
+        <div class="mockup-button mockup-button-outline mockup-button-sm">Flag for re-extraction</div>
+        <div class="mockup-button mockup-button-outline mockup-button-sm" style="color:#94a3b8;border-color:#e5e7eb">Delete</div>
+      </div>
+    </div>
+    <figcaption>Mix of free-text and dropdown fields, plus the three actions.</figcaption>
+  </figure>
+</article>
+
+<!-- ============================================================= -->
+
+<article id="tables">
+  <h3>5 · Step 1 — Tables</h3>
+  <p>
+    The pipeline parses every table out of the paper's markdown and lists them here. For each table, choose <strong>Effect-size table</strong>, <strong>Not an effect-size table</strong>, or leave it <strong>undecided</strong>. Only tables flagged as effect-size flow into Steps 2-4.
+  </p>
+  <p>
+    The selected option is filled (dark); the other is outlined. <strong>You can't click Done until every table is classified</strong> — undecided tables block submission.
+  </p>
+
+  <figure class="ui-mockup">
+    <div class="mockup-frame mockup-card">
+      <div class="mockup-flex-row">
+        <div>
+          <strong>Page 5 · Table 1</strong><br>
+          <span class="badge badge-confirmed">effect-size table</span>
+        </div>
+        <div class="mockup-row-actions">
+          <div class="mockup-button mockup-button-contrast mockup-button-sm">Effect-size table</div>
+          <div class="mockup-button mockup-button-outline mockup-button-sm">Not an effect-size table</div>
+        </div>
+      </div>
+      <div class="mockup-divider"></div>
+      <div class="mockup-flex-row">
+        <div>
+          <strong>Page 1 · Table 2</strong><br>
+          <span class="badge badge-deleted">not effect-size</span>
+        </div>
+        <div class="mockup-row-actions">
+          <div class="mockup-button mockup-button-outline mockup-button-sm">Effect-size table</div>
+          <div class="mockup-button mockup-button-contrast mockup-button-sm">Not an effect-size table</div>
+        </div>
+      </div>
+      <div class="mockup-divider"></div>
+      <div class="mockup-flex-row">
+        <div>
+          <strong>Page 3 · Table 1</strong><br>
+          <span class="badge badge-pending">undecided</span>
+        </div>
+        <div class="mockup-row-actions">
+          <div class="mockup-button mockup-button-outline mockup-button-sm">Effect-size table</div>
+          <div class="mockup-button mockup-button-outline mockup-button-sm">Not an effect-size table</div>
+        </div>
+      </div>
+    </div>
+    <figcaption>Three tables in three different states. Until <em>Page 3 · Table 1</em> is classified, Done is blocked with an error.</figcaption>
+  </figure>
+
+  <p>Use <em>Add a table manually</em> at the bottom only if the parser missed a real table — its outcomes / timepoints / estimates are added from scratch.</p>
+</article>
+
+<!-- ============================================================= -->
+
+<article id="outcomes">
+  <h3>6 · Step 2 — Outcomes</h3>
+  <p>For each effect-size table, list every outcome it reports. Each outcome has a short name, a domain (Mortality / Injury / Crime / etc.), and a definition.</p>
+
+  <figure class="ui-mockup">
+    <div class="mockup-frame mockup-card">
+      <strong>Page 5 · Table 1</strong>
+      <div class="mockup-child-card">
+        <div class="mockup-flex-row">
+          <strong>All firearm fatalities</strong>
+          <span class="badge badge-modified">edited</span>
+        </div>
+        <div class="mockup-field-grid">
+          <div class="mockup-field"><div class="mockup-field-label">outcome name</div><div class="mockup-input mockup-input-small">All firearm fatalities</div></div>
+          <div class="mockup-field"><div class="mockup-field-label">outcome domain</div><div class="mockup-input mockup-input-small">Mortality</div></div>
+          <div class="mockup-field"><div class="mockup-field-label">outcome definition</div><div class="mockup-input mockup-input-small">Deaths / 100,000 children 0-14 y</div></div>
+        </div>
+        <div class="mockup-row-actions">
+          <div class="mockup-button mockup-button-primary mockup-button-sm">Save</div>
+          <div class="mockup-button mockup-button-outline mockup-button-sm">Delete</div>
+        </div>
+      </div>
+    </div>
+    <figcaption>One outcome card. The <span class="badge badge-modified">edited</span> badge appears once any field is changed.</figcaption>
+  </figure>
+</article>
+
+<!-- ============================================================= -->
+
+<article id="timepoints">
+  <h3>7 · Step 3 — Timepoints</h3>
+  <p>List the timepoints each effect-size table reports — e.g. <em>baseline</em>, <em>endline</em>, <em>12 mo</em>, <em>1991-2016</em>. A single overall window counts as one timepoint.</p>
+
+  <figure class="ui-mockup">
+    <div class="mockup-frame mockup-card">
+      <strong>Page 5 · Table 1</strong>
+      <div class="mockup-child-card">
+        <div class="mockup-flex-row"><strong>1991-2016</strong><span></span></div>
+        <div class="mockup-field-grid">
+          <div class="mockup-field"><div class="mockup-field-label">timepoint label</div><div class="mockup-input mockup-input-small">1991-2016</div></div>
+          <div class="mockup-field"><div class="mockup-field-label">timeframe (months)</div><div class="mockup-input mockup-input-small">300</div></div>
+        </div>
+        <div class="mockup-row-actions">
+          <div class="mockup-button mockup-button-primary mockup-button-sm">Save</div>
+          <div class="mockup-button mockup-button-outline mockup-button-sm">Delete</div>
+        </div>
+      </div>
+    </div>
+  </figure>
+</article>
+
+<!-- ============================================================= -->
+
+<article id="estimates">
+  <h3>8 · Step 4 — Estimates</h3>
+  <p>
+    The actual numbers. Each estimate is one (table, outcome, timepoint) triple. Estimates carry the full 25-field schema: <code>effect_size_raw</code>, <code>ci_or_se_raw</code>, <code>effect_value</code>, <code>lower_ci</code>, <code>upper_ci</code>, etc. <code>direction_of_effect</code> renders as a dropdown (↓ beneficial / ↑ harmful / ↔ null / data not available).
+  </p>
+
+  <figure class="ui-mockup">
+    <div class="mockup-frame mockup-card">
+      <strong>Page 5 · Table 1</strong>
+      <div class="mockup-child-card">
+        <div class="mockup-flex-row">
+          <strong>All firearm fatalities · 1991-2016</strong>
+          <span></span>
+        </div>
+        <div class="mockup-field-grid">
+          <div class="mockup-field"><div class="mockup-field-label">linked outcome</div><div class="mockup-input mockup-input-small">All firearm fatalities ▾</div></div>
+          <div class="mockup-field"><div class="mockup-field-label">linked timepoint</div><div class="mockup-input mockup-input-small">1991-2016 ▾</div></div>
+        </div>
+        <div class="mockup-field-grid">
+          <div class="mockup-field"><div class="mockup-field-label">effect size raw</div><div class="mockup-input mockup-input-small">IRR 0.87 (0.82-0.93)</div></div>
+          <div class="mockup-field"><div class="mockup-field-label">direction of effect</div><div class="mockup-input mockup-input-small">↓ beneficial ▾</div></div>
+          <div class="mockup-field"><div class="mockup-field-label">effect value</div><div class="mockup-input mockup-input-small">0.87</div></div>
+          <div class="mockup-field"><div class="mockup-field-label">lower ci</div><div class="mockup-input mockup-input-small">0.82</div></div>
+        </div>
+        <div class="mockup-row-actions">
+          <div class="mockup-button mockup-button-primary mockup-button-sm">Save edits</div>
+          <div class="mockup-button mockup-button-outline mockup-button-sm">Flag re-extract</div>
+          <div class="mockup-button mockup-button-outline mockup-button-sm">Delete</div>
+        </div>
+      </div>
+    </div>
+    <figcaption>One estimate card with FK dropdowns, a few of the 25 fields, and the row actions. The <strong>Flag re-extract</strong> button toggles between flag and unflag.</figcaption>
+  </figure>
+
+  <p><strong>Orphan estimates</strong> — at the bottom of the page you may see estimates not linked to any current table. These are usually leftovers from an earlier extraction. Re-link them via the dropdowns or delete them.</p>
+</article>
+
+<!-- ============================================================= -->
+
+<article id="saving">
+  <h3>9 · Saving your work</h3>
+  <p>
+    Each row card has a <strong>Save</strong> button that persists just that row. For pages with many rows (Outcomes, Timepoints, Estimates), a <strong>sticky save bar</strong> sits at the top — click <strong>Save draft</strong> to fire every row's Save in one click.
+  </p>
+  <figure class="ui-mockup">
+    <div class="mockup-frame">
+      <div class="mockup-save-bar">
+        <span class="mockup-save-label">Drafts auto-save per row. Click <strong>Save draft</strong> to apply every change on this page at once.</span>
+        <div class="mockup-button mockup-button-primary mockup-button-sm">Save draft</div>
+        <span class="mockup-subtitle" style="font-size:0.8rem;">✓ 8 saved</span>
+      </div>
+    </div>
+    <figcaption>The sticky save bar pinned at the top of the Outcomes / Timepoints / Estimates pages.</figcaption>
+  </figure>
+  <p>
+    Your draft persists across sign-outs as long as the paper stays checked out. If you close the browser and come back tomorrow, your edits are still there. The lock is only released when you click <strong>Release</strong>, <strong>Done</strong>, or an admin force-releases.
+  </p>
+</article>
+
+<!-- ============================================================= -->
+
+<article id="reextract">
+  <h3>10 · Re-extract flag</h3>
+  <p>
+    Two places to flag rows that the LLM clearly got wrong and need to be re-processed:
+  </p>
+  <ul>
+    <li><strong>Paper info</strong> — a <em>Flag for re-extraction</em> button next to Save flags the whole paper for the next extraction pass.</li>
+    <li><strong>Estimate row</strong> — a <em>Flag re-extract</em> button on each estimate card flags just that estimate.</li>
+  </ul>
+  <p>
+    Both buttons toggle: clicking again on an already-flagged target unflags it. The dashboard <span class="badge badge-reextract">re-extract</span> badge appears if <em>either</em> the paper or any of its estimates is flagged, so a single bad estimate is visible from the top-level view.
+  </p>
+</article>
+
+<!-- ============================================================= -->
+
+<article id="release-done">
+  <h3>11 · Release vs Done <em>(important)</em></h3>
+  <p>Both buttons release your lock. They differ in whether they record you as one of the 2 reviewers:</p>
+  <table class="mockup-table mockup-table-compare">
+    <thead><tr><th></th><th>Done</th><th>Release</th></tr></thead>
+    <tbody>
+      <tr><td>Releases the lock</td><td>✓</td><td>✓</td></tr>
+      <tr><td>Keeps your edits</td><td>✓</td><td>✓</td></tr>
+      <tr><td>Counts toward 2-reviewer cap</td><td><strong>✓</strong></td><td>—</td></tr>
+      <tr><td>Blocked if any table is undecided</td><td><strong>✓</strong></td><td>—</td></tr>
+      <tr><td>When to use</td>
+          <td>You're finished reviewing this paper.</td>
+          <td>You checked out by mistake, or you don't want to review this paper.</td></tr>
+    </tbody>
+  </table>
+  <p><strong>Only click Release if you're not going to work on this paper anymore.</strong> If you're just stepping away briefly, leave it checked out — your lock persists until you Release or Done.</p>
+</article>
+
+<!-- ============================================================= -->
+
+<article id="dual">
+  <h3>12 · Dual review (max 2 reviewers per paper)</h3>
+  <p>Each paper supports up to two distinct reviewers. The <strong>Reviews</strong> column on the dashboard shows the progress:</p>
+  <ul>
+    <li><span class="muted">0 / 2</span> — not yet reviewed.</li>
+    <li><span class="badge badge-modified">1 / 2</span> — one reviewer has clicked <strong>Done</strong>. Hover for the email.</li>
+    <li><span class="badge badge-confirmed">2 / 2</span> — fully reviewed. No new reviewers can check out the paper.</li>
+  </ul>
+  <p>
+    Review is <strong>sequential, not blind</strong> — the second reviewer sees the first reviewer's edits. After 2 / 2 is reached, only the two existing reviewers (and admins) can re-check-out to amend. A reviewer can re-check-out and click Done any number of times — only one slot is consumed.
+  </p>
+</article>
+
+<!-- ============================================================= -->
+
+<article id="admin">
+  <h3>13 · Admin actions</h3>
+  <p>Admins (<code>is_admin = True</code>) get extra capabilities:</p>
+  <ul>
+    <li><strong>Force release</strong> — release someone else's checked-out paper. Available in the draft banner when viewing a held-by-another paper.</li>
+    <li><strong>View as admin</strong> — read a draft someone else owns.</li>
+    <li><strong>Publish to Sheet</strong> — overwrite the Google Sheet with the current local DB. From <a href="/admin">/admin</a>.</li>
+    <li><strong>User management</strong> — promote / remove reviewers from <a href="/admin">/admin</a>.</li>
+  </ul>
+  <p>Anyone (not just admins) can <strong>↻ Refresh from Sheet</strong> on the dashboard — that pulls Sheet contents into the local DB and skips any paper currently checked out so in-progress drafts aren't trashed.</p>
+</article>
+
+<style>
+  .help-toc {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem 0.6rem;
+    padding: 0.6rem 0 0.2rem;
+  }
+  .help-toc a {
+    padding: 0.3rem 0.7rem;
+    border-radius: 0.5rem;
+    background: var(--brand-soft);
+    color: var(--brand);
+    font-size: 0.88rem;
+    text-decoration: none;
+  }
+  .help-toc a:hover { background: var(--brand); color: white; }
+  .help-toc a:visited { color: var(--brand); }
+  .help-toc a:visited:hover { color: white; }
+
+  article + article { margin-top: 1.1rem; }
+  article h3 { margin-top: 0; }
+
+  /* ---------- UI mockup framework ---------- */
+  figure.ui-mockup { margin: 1rem 0 1.25rem; padding: 0; }
+  figure.ui-mockup figcaption {
+    margin-top: 0.45rem;
+    color: var(--text-soft);
+    font-size: 0.85rem;
+    font-style: italic;
+  }
+  .mockup-frame {
+    border: 1px dashed #cbd5e1;
+    border-radius: 0.7rem;
+    background: #fbfcfd;
+    padding: 1rem 1.1rem;
+  }
+  .mockup-card {
+    background: #ffffff;
+    box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04), 0 4px 12px -8px rgba(15, 23, 42, 0.06);
+  }
+  .mockup-h2 {
+    font-size: 1.4rem; font-weight: 650; letter-spacing: -0.02em; margin-bottom: 0.25rem;
+  }
+  .mockup-hgroup { text-align: center; margin-bottom: 1rem; }
+  .mockup-subtitle { color: var(--text-soft); font-size: 0.88rem; margin-bottom: 0.4rem; }
+  .mockup-subtitle.mockup-center { text-align: center; margin-top: 0.75rem; }
+
+  .mockup-field-label {
+    font-size: 0.7rem; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.06em; color: var(--text-soft); margin-bottom: 0.25rem;
+  }
+  .mockup-input {
+    background: #ffffff;
+    border: 1px solid #d1d5db;
+    border-radius: 0.5rem;
+    padding: 0.4rem 0.7rem;
+    color: var(--text);
+    font-size: 0.9rem;
+    margin-bottom: 0.75rem;
+  }
+  .mockup-input-small { font-size: 0.82rem; padding: 0.3rem 0.55rem; margin-bottom: 0; }
+
+  .mockup-field-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 0.5rem 0.8rem;
+    margin-bottom: 0.6rem;
+  }
+  .mockup-field { display: flex; flex-direction: column; }
+
+  .mockup-button {
+    display: inline-flex; align-items: center;
+    padding: 0.4rem 0.85rem;
+    border-radius: 0.55rem;
+    font-size: 0.88rem; font-weight: 500;
+    border: 1px solid transparent;
+  }
+  .mockup-button-sm { padding: 0.3rem 0.7rem; font-size: 0.82rem; }
+  .mockup-button-primary { background: var(--brand); color: #ffffff; border-color: var(--brand); }
+  .mockup-button-outline { background: transparent; color: var(--text-soft); border-color: #e5e7eb; }
+  .mockup-button-contrast { background: #0f172a; color: #ffffff; border-color: #0f172a; }
+
+  .mockup-row-actions { display: inline-flex; gap: 0.4rem; flex-wrap: wrap; align-items: center; }
+  .mockup-flex-row {
+    display: flex; justify-content: space-between; align-items: flex-start;
+    gap: 1rem; flex-wrap: wrap; margin: 0.5rem 0;
+  }
+
+  .mockup-banner {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 1rem; flex-wrap: wrap;
+    padding: 0.85rem 1.1rem; margin: 0.5rem 0;
+    border-radius: 0.6rem;
+    border-left: 4px solid transparent;
+  }
+  .mockup-banner-mine { background: #ecfeff; border-left-color: #0891b2; }
+  .mockup-banner small { display: block; color: var(--text-soft); margin-top: 0.15rem; }
+
+  .mockup-step-nav {
+    display: flex; flex-wrap: wrap; gap: 0.25rem;
+    margin-top: 0.6rem; padding: 0.5rem 0 0;
+    border-top: 1px solid #f1f5f9;
+  }
+  .mockup-step {
+    padding: 0.35rem 0.75rem;
+    border-radius: 0.5rem;
+    font-size: 0.88rem; font-weight: 500;
+    color: var(--text-soft);
+  }
+  .mockup-step-active { background: var(--brand); color: #ffffff; }
+
+  .mockup-child-card {
+    border: 1px solid #f1f5f9;
+    border-radius: 0.55rem;
+    padding: 0.75rem 0.95rem;
+    background: #fcfdff;
+    margin: 0.5rem 0;
+  }
+
+  .mockup-divider { border-top: 1px dashed #e5e7eb; margin: 0.85rem 0; }
+
+  .mockup-table {
+    width: 100%;
+    border: 1px solid #e5e7eb;
+    border-radius: 0.55rem;
+    overflow: hidden;
+    font-size: 0.86rem;
+    background: #ffffff;
+    margin: 0;
+  }
+  .mockup-table thead th {
+    background: #f1f5f9; text-align: left; padding: 0.5rem 0.7rem;
+    font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.04em;
+    color: var(--text-soft); font-weight: 600;
+  }
+  .mockup-table tbody td {
+    padding: 0.55rem 0.7rem;
+    border-top: 1px solid #f1f5f9;
+    vertical-align: top;
+  }
+  .mockup-table-compare th, .mockup-table-compare td { text-align: center; }
+  .mockup-table-compare tbody td:first-child { text-align: left; font-weight: 500; color: var(--text); }
+
+  /* Save-bar mockup matches the real bar */
+  .mockup-save-bar {
+    display: flex; align-items: center; gap: 0.9rem; flex-wrap: wrap;
+    padding: 0.6rem 1rem;
+    background: #fffbeb;
+    border: 1px solid #fde68a;
+    border-radius: 0.6rem;
+  }
+  .mockup-save-label { flex: 1; color: #92400e; font-size: 0.92rem; }
+</style>
+
+{% endblock %}

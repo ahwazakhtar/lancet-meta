@@ -6,8 +6,8 @@
     <h2>Welcome back</h2>
     <p>Enter your email to start reviewing.</p>
   </hgroup>
-  {% if error == "unknown" %}
-    <p class="msg-error">That email isn't on the reviewer list. Ask an admin to add you.</p>
+  {% if error == "invalid" %}
+    <p class="msg-error">That doesn't look like a valid email address.</p>
   {% endif %}
   <form method="post" action="/login">
     <label>

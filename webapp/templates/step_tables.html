@@ -32,14 +32,14 @@
           <form method="post" action="/papers/{{ paper.unique_id }}/tables/{{ t.id }}/set-effect-size" style="display:inline">
             <input type="hidden" name="is_effect_size" value="true">
             <button type="submit" {% if not can_edit %}disabled{% endif %}
-                    class="{% if t.is_effect_size %}contrast{% else %}outline{% endif %}">
+                    class="{% if t.is_effect_size is sameas true %}contrast{% else %}outline{% endif %}">
               Effect-size table
             </button>
           </form>
           <form method="post" action="/papers/{{ paper.unique_id }}/tables/{{ t.id }}/set-effect-size" style="display:inline">
             <input type="hidden" name="is_effect_size" value="false">
             <button type="submit" {% if not can_edit %}disabled{% endif %}
-                    class="secondary outline">
+                    class="{% if t.is_effect_size is sameas false %}contrast{% else %}secondary outline{% endif %}">
               Not an effect-size table
             </button>
           </form>

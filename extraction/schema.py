@@ -208,3 +208,42 @@ def paper_field_names() -> list[str]:
 
 def effect_size_field_names() -> list[str]:
     return [f.name for f in EFFECT_SIZE_FIELDS]
+
+
+# Fields whose value is constrained to a small set of choices.
+# Templates render these as <select> dropdowns instead of free-text inputs.
+# Add more entries as the schema converges.
+FIELD_OPTIONS: dict[str, list[str]] = {
+    "direction_of_effect": [
+        "↓ beneficial",
+        "↑ harmful",
+        "↔ null",
+        NA,
+    ],
+    "implementation_fidelity_reported": [
+        "Yes",
+        "No",
+        NA,
+    ],
+    "publication_type": [
+        "Journal article",
+        "Report",
+        "Thesis",
+        "Pre-print",
+        NA,
+    ],
+    "rob_judgment": [
+        "Low",
+        "Moderate",
+        "Serious",
+        "Critical",
+        NA,
+    ],
+    "setting_type": [
+        "Urban",
+        "Suburban",
+        "Rural",
+        "Mixed",
+        NA,
+    ],
+}

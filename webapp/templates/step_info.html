@@ -14,7 +14,17 @@
           <label>
             <span class="field-label">{{ field.replace("_", " ") }}</span>
             {% set val = paper[field] %}
-            {% if val and val|length > 80 %}
+            {% set opts = field_options.get(field) %}
+            {% if opts %}
+              <select name="{{ field }}">
+                {% for o in opts %}
+                  <option value="{{ o }}" {% if val == o %}selected{% endif %}>{{ o }}</option>
+                {% endfor %}
+                {% if val and val not in opts %}
+                  <option value="{{ val }}" selected>{{ val }} (current)</option>
+                {% endif %}
+              </select>
+            {% elif val and val|length > 80 %}
               <textarea name="{{ field }}" rows="3">{{ val }}</textarea>
             {% else %}
               <input type="text" name="{{ field }}" value="{{ val or '' }}">
@@ -26,13 +36,20 @@
         <span class="field-label">Reviewer notes (paper)</span>
         <textarea name="reviewer_notes" rows="2">{{ paper.reviewer_notes }}</textarea>
       </label>
-      <label>
-        <input type="checkbox" name="needs_reextraction" {% if paper.needs_reextraction %}checked{% endif %}>
-        Flag this paper for re-extraction
-      </label>
+      {% if paper.needs_reextraction %}
+        <p class="msg-error" style="margin-top:0.4rem;">
+          <strong>Flagged for re-extraction.</strong>
+          The local pipeline will re-process this paper on the next run.
+        </p>
+      {% endif %}
       <div class="row-actions">
         <button type="submit">Save paper edits</button>
-        <button type="submit" formaction="/papers/{{ paper.unique_id }}/confirm" class="contrast">Confirm paper</button>
+        <button type="submit"
+                formaction="/papers/{{ paper.unique_id }}/flag-reextract"
+                formnovalidate
+                class="secondary outline">
+          {% if paper.needs_reextraction %}Unflag re-extract{% else %}Flag for re-extraction{% endif %}
+        </button>
         <button type="submit" formaction="/papers/{{ paper.unique_id }}/delete" class="secondary outline"
                 onclick="return confirm('Delete this paper extraction?');">Delete</button>
       </div>

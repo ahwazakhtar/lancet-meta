@@ -30,11 +30,19 @@ from .tables import ParsedTable
 
 
 class ReviewStatus(str, enum.Enum):
-    pending = "pending"          # extracted, awaiting review
-    confirmed = "confirmed"      # reviewer marked OK
-    modified = "modified"        # reviewer edited
+    """Simplified review state.
+
+    `confirmed` is the default for any row — newly-extracted data is treated
+    as good unless a reviewer edits or deletes it. `pending` is retained only
+    to keep legacy rows readable; the UI displays it identically to
+    `confirmed` (no badge).
+    """
+
+    confirmed = "confirmed"               # default — clean / untouched
+    modified = "modified"                 # reviewer edited
     needs_reextraction = "needs_reextraction"
     deleted = "deleted"
+    pending = "pending"                   # legacy — treated as confirmed
 
 
 class PaperRow(SQLModel, table=True):
@@ -74,7 +82,7 @@ class PaperRow(SQLModel, table=True):
     contextual_barriers_facilitators: str = ""
     notes: str = ""
 
-    status: ReviewStatus = Field(default=ReviewStatus.pending)
+    status: ReviewStatus = Field(default=ReviewStatus.confirmed)
     needs_reextraction: bool = Field(default=False)
     reviewer_notes: str = ""
     last_modified_by: Optional[str] = None
@@ -111,7 +119,7 @@ class PaperTable(SQLModel, table=True):
     # reviewer (in which case body_markdown will be empty)?
     is_manual: bool = Field(default=False)
 
-    status: ReviewStatus = Field(default=ReviewStatus.pending)
+    status: ReviewStatus = Field(default=ReviewStatus.confirmed)
     last_modified_by: Optional[str] = None
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
@@ -127,7 +135,7 @@ class TableOutcome(SQLModel, table=True):
     outcome_name: str = ""
     outcome_domain: str = ""
     outcome_definition: str = ""
-    status: ReviewStatus = Field(default=ReviewStatus.pending)
+    status: ReviewStatus = Field(default=ReviewStatus.confirmed)
     reviewer_notes: str = ""
     last_modified_by: Optional[str] = None
     updated_at: datetime = Field(default_factory=datetime.utcnow)
@@ -143,7 +151,7 @@ class TableTimepoint(SQLModel, table=True):
     paper_unique_id: str = Field(index=True)
     timepoint_label: str = ""
     outcome_timeframe_months: str = ""
-    status: ReviewStatus = Field(default=ReviewStatus.pending)
+    status: ReviewStatus = Field(default=ReviewStatus.confirmed)
     reviewer_notes: str = ""
     last_modified_by: Optional[str] = None
     updated_at: datetime = Field(default_factory=datetime.utcnow)
@@ -192,12 +200,27 @@ class EffectSizeRow(SQLModel, table=True):
     group2_n: str = ""
     effect_size_notes: str = ""
 
-    status: ReviewStatus = Field(default=ReviewStatus.pending)
+    status: ReviewStatus = Field(default=ReviewStatus.confirmed)
     needs_reextraction: bool = Field(default=False)
     reviewer_notes: str = ""
     last_modified_by: Optional[str] = None
     extracted_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class PaperReview(SQLModel, table=True):
+    """One row per (paper, reviewer) where the reviewer marked the paper
+    as reviewed by clicking Done. A paper is "fully reviewed" once two
+    distinct reviewer emails appear here. A reviewer can re-check-out the
+    paper to make further edits without inserting a duplicate row.
+    """
+
+    __tablename__ = "paper_reviews"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    paper_unique_id: str = Field(index=True)
+    reviewer_email: str = Field(index=True)
+    completed_at: datetime = Field(default_factory=datetime.utcnow)
 
 
 class User(SQLModel, table=True):
@@ -252,6 +275,16 @@ def get_engine(db_path: str | Path):
         "outcome_id": "INTEGER",
         "timepoint_id": "INTEGER",
     })
+    # One-time migration: legacy rows used `pending` as the default. The new
+    # model treats all clean rows as `confirmed`. Rewrite once.
+    from sqlalchemy import text
+
+    with engine.begin() as conn:
+        for table in ("papers", "effect_sizes", "paper_tables",
+                      "table_outcomes", "table_timepoints"):
+            conn.execute(text(
+                f"UPDATE {table} SET status='confirmed' WHERE status='pending'"
+            ))
     return engine
 
 
@@ -324,27 +357,27 @@ def upsert_paper(
             session.flush()
             table_id_by_label[parsed.label] = row.id  # type: ignore[assignment]
 
-        # Any LLM-returned label that doesn't match a parsed label: create an
-        # is_manual=True placeholder so the data isn't silently dropped.
-        for label, llm_tbl in llm_by_label.items():
-            if label in table_id_by_label:
-                continue
-            row = PaperTable(
-                paper_unique_id=paper.unique_id,
-                table_label=label,
-                page=0,
-                table_index=0,
-                body_markdown="",
-                is_effect_size=True,
-                is_manual=True,
-            )
-            session.add(row)
-            session.flush()
-            table_id_by_label[label] = row.id  # type: ignore[assignment]
+        # If the LLM returned a label that doesn't match any parsed table,
+        # drop it. The prompt is explicit ("tables only — discard in-text
+        # estimates"), and an invented label almost always means the model
+        # tried to surface body-text findings. Creating a manual placeholder
+        # for these clutters the reviewer UI. Reviewers can still add genuinely
+        # missed tables via the "Add a table manually" form in Step 1.
+        for label in llm_by_label:
+            if label not in table_id_by_label:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "Dropping LLM-returned table %r for %s — label doesn't match "
+                    "any parsed table",
+                    label, paper.unique_id,
+                )
 
         # Populate outcomes, timepoints, and estimates for the LLM-flagged
-        # tables.
+        # tables (only those whose labels matched a parsed table — invented
+        # labels were already dropped above).
         for label, llm_tbl in llm_by_label.items():
+            if label not in table_id_by_label:
+                continue
             table_id = table_id_by_label[label]
             outcome_id_by_name: dict[str, int] = {}
             for oc in llm_tbl.outcomes:
@@ -387,7 +420,7 @@ def upsert_paper(
                     status=(
                         ReviewStatus.needs_reextraction
                         if needs_reextract
-                        else ReviewStatus.pending
+                        else ReviewStatus.confirmed
                     ),
                     **est_data,
                 )
@@ -534,7 +567,7 @@ def _kwargs_from_row(row: dict, model, never_overwrite: set[str]) -> dict:
     cols = {c.name for c in model.__table__.columns} - never_overwrite
     out = {k: row[k] for k in cols if k in row}
     if "status" in cols:
-        out["status"] = _coerce_status(row.get("status", "pending"))
+        out["status"] = _coerce_status(row.get("status", "confirmed"))
     if "needs_reextraction" in cols:
         out["needs_reextraction"] = _coerce_bool(row.get("needs_reextraction"))
     if "is_effect_size" in cols:

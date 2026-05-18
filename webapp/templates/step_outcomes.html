@@ -38,9 +38,11 @@
         <div id="o-{{ o.id }}" class="child-card">
           <div class="flex-row">
             <strong>{{ o.outcome_name or "(no name)" }}</strong>
-            <span><span class="badge badge-{{ o.status.value }}">{{ o.status.value }}</span></span>
+            <span>
+              {% if o.status.value == "modified" %}<span class="badge badge-modified">edited</span>{% endif %}
+            </span>
           </div>
-          <form method="post" action="/outcomes/{{ o.id }}/edit">
+          <form method="post" action="/outcomes/{{ o.id }}/edit" data-row-form="edit">
             <fieldset {% if not can_edit %}disabled{% endif %}>
               <div class="field-grid">
                 <label>
@@ -62,7 +64,6 @@
               </label>
               <div class="row-actions">
                 <button type="submit">Save</button>
-                <button type="submit" formaction="/outcomes/{{ o.id }}/confirm" class="contrast">Confirm</button>
                 <button type="submit" formaction="/outcomes/{{ o.id }}/delete" class="secondary outline"
                         onclick="return confirm('Delete this outcome?');">Delete</button>
               </div>

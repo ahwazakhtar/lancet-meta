@@ -30,6 +30,7 @@ from google.oauth2.service_account import Credentials
 from .schema import effect_size_field_names, paper_field_names
 from .storage import (
     EffectSizeRow,
+    PaperReview,
     PaperRow,
     PaperTable,
     TableOutcome,
@@ -91,6 +92,13 @@ TABLE_TIMEPOINT_SHEET_COLUMNS = [
     "reviewer_notes",
     "last_modified_by",
     "updated_at",
+]
+
+PAPER_REVIEW_SHEET_COLUMNS = [
+    "id",
+    "paper_unique_id",
+    "reviewer_email",
+    "completed_at",
 ]
 
 EFFECT_SIZE_SHEET_COLUMNS = [
@@ -225,6 +233,7 @@ def _tab_names() -> dict[str, str]:
         "outcomes": os.environ.get("TABLE_OUTCOMES_SHEET_NAME", "table_outcomes"),
         "timepoints": os.environ.get("TABLE_TIMEPOINTS_SHEET_NAME", "table_timepoints"),
         "effects": os.environ.get("EFFECT_SIZES_SHEET_NAME", "effect_sizes"),
+        "reviews": os.environ.get("PAPER_REVIEWS_SHEET_NAME", "paper_reviews"),
     }
 
 
@@ -250,6 +259,10 @@ def _row_for_timepoint(tp: TableTimepoint) -> list[str]:
     return [_cell(getattr(tp, c, "")) for c in TABLE_TIMEPOINT_SHEET_COLUMNS]
 
 
+def _row_for_review(r: PaperReview) -> list[str]:
+    return [_cell(getattr(r, c, "")) for c in PAPER_REVIEW_SHEET_COLUMNS]
+
+
 def _row_for_effect(e: EffectSizeRow) -> list[str]:
     def g(k: str) -> str:
         if k == "es_id":
@@ -264,11 +277,17 @@ def push_to_sheets(
     tables: Iterable[PaperTable] = (),
     outcomes: Iterable[TableOutcome] = (),
     timepoints: Iterable[TableTimepoint] = (),
+    reviews: Iterable[PaperReview] | None = None,
 ) -> tuple[int, int]:
-    """Replace the contents of all five tabs with the supplied rows.
+    """Replace the contents of the data tabs with the supplied rows.
+
+    `reviews=None` (the default) means do NOT touch the paper_reviews tab —
+    callers without review state in their DB (the local extraction CLI)
+    should not blow away review records that only exist on the deployed app.
+    Pass an iterable (including empty) to overwrite the tab.
 
     Returns (papers_pushed, effect_sizes_pushed) for backwards-compatible
-    logging; tables/outcomes/timepoints counts are logged but not returned.
+    logging; counts for the other tabs are logged but not returned.
     """
     sh = _open_sheet()
     names = _tab_names()
@@ -285,20 +304,29 @@ def push_to_sheets(
     tp_rows = [TABLE_TIMEPOINT_SHEET_COLUMNS] + [_row_for_timepoint(t) for t in timepoints]
     e_rows = [EFFECT_SIZE_SHEET_COLUMNS] + [_row_for_effect(e) for e in effect_sizes]
 
-    for ws, rows in (
+    writes: list = [
         (p_ws, p_rows),
         (t_ws, t_rows),
         (o_ws, o_rows),
         (tp_ws, tp_rows),
         (e_ws, e_rows),
-    ):
+    ]
+
+    n_r: int | str = "(skipped)"
+    if reviews is not None:
+        r_ws = _open_or_create_tab(sh, names["reviews"], PAPER_REVIEW_SHEET_COLUMNS)
+        r_rows = [PAPER_REVIEW_SHEET_COLUMNS] + [_row_for_review(r) for r in reviews]
+        writes.append((r_ws, r_rows))
+        n_r = len(r_rows) - 1
+
+    for ws, rows in writes:
         ws.clear()
         ws.update("A1", rows)
 
     n_p, n_e = len(p_rows) - 1, len(e_rows) - 1
     logger.info(
-        "Pushed %d papers, %d tables, %d outcomes, %d timepoints, %d effect sizes to Sheet",
-        n_p, len(t_rows) - 1, len(o_rows) - 1, len(tp_rows) - 1, n_e,
+        "Pushed %d papers, %d tables, %d outcomes, %d timepoints, %d effect sizes, %s reviews to Sheet",
+        n_p, len(t_rows) - 1, len(o_rows) - 1, len(tp_rows) - 1, n_e, n_r,
     )
     return n_p, n_e
 
@@ -309,11 +337,12 @@ def pull_from_sheets() -> tuple[
     list[dict[str, str]],  # tables
     list[dict[str, str]],  # outcomes
     list[dict[str, str]],  # timepoints
+    list[dict[str, str]],  # reviews
 ]:
-    """Read all five tabs and return raw row dicts.
+    """Read every tab and return raw row dicts.
 
-    Tables / outcomes / timepoints are returned as empty lists if the tabs
-    don't exist yet (older Sheets won't have them).
+    Tables / outcomes / timepoints / reviews are returned as empty lists if
+    the tabs don't exist yet (older Sheets won't have them).
     """
     sh = _open_sheet()
     names = _tab_names()
@@ -332,9 +361,10 @@ def pull_from_sheets() -> tuple[
     tables = _read(names["tables"], required=False)
     outcomes = _read(names["outcomes"], required=False)
     timepoints = _read(names["timepoints"], required=False)
+    reviews = _read(names["reviews"], required=False)
 
     logger.info(
-        "Pulled %d papers, %d tables, %d outcomes, %d timepoints, %d effect sizes from Sheet",
-        len(papers), len(tables), len(outcomes), len(timepoints), len(effects),
+        "Pulled %d papers, %d tables, %d outcomes, %d timepoints, %d effect sizes, %d reviews from Sheet",
+        len(papers), len(tables), len(outcomes), len(timepoints), len(effects), len(reviews),
     )
-    return papers, effects, tables, outcomes, timepoints
+    return papers, effects, tables, outcomes, timepoints, reviews

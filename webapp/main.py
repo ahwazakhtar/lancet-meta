@@ -529,12 +529,13 @@ def paper_import_one(
     if paper.checked_out_by != email:
         return _redirect_step(unique_id, "tables", err="Check+out+this+paper+before+importing")
     try:
-        papers, effects, tables, outcomes, timepoints = pull_from_sheets()
+        papers, effects, tables, outcomes, timepoints, reviews = pull_from_sheets()
     except Exception as exc:  # noqa: BLE001
         return _redirect_step(unique_id, "tables", err=str(exc)[:200])
     found, n_e = import_paper_from_sheet(
         _engine, unique_id, papers, effects,
         table_rows=tables, outcome_rows=outcomes, timepoint_rows=timepoints,
+        review_rows=reviews,
     )
     if not found:
         return _redirect_step(unique_id, "tables", err="Paper+not+found+in+Sheet")
@@ -1367,10 +1368,11 @@ def refresh_from_sheet(
     """Pull the Sheet and replace all UNLOCKED papers in the local DB."""
     actor = current_email(request)
     try:
-        papers, effects, tables, outcomes, timepoints = pull_from_sheets()
+        papers, effects, tables, outcomes, timepoints, reviews = pull_from_sheets()
         n_p, n_e, skipped = import_from_sheet_rows(
             _engine, papers, effects,
             table_rows=tables, outcome_rows=outcomes, timepoint_rows=timepoints,
+            review_rows=reviews,
             replace=True, preserve_checked_out=True,
         )
     except Exception as exc:  # noqa: BLE001
@@ -1415,7 +1417,8 @@ def admin_publish(
         effects = list(
             session.exec(select(EffectSizeRow).where(EffectSizeRow.status != ReviewStatus.deleted))
         )
-        n_p, n_e = push_to_sheets(papers, effects, tables, outcomes, timepoints)
+        reviews = list(session.exec(select(PaperReview)))
+        n_p, n_e = push_to_sheets(papers, effects, tables, outcomes, timepoints, reviews)
     except Exception as exc:  # noqa: BLE001
         return RedirectResponse(
             f"/admin?err={str(exc)[:300]}", status_code=status.HTTP_303_SEE_OTHER

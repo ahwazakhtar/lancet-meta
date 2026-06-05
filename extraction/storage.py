@@ -294,7 +294,7 @@ def get_engine(db_path: str | Path):
 
 
 def _wipe_paper_children(session: Session, unique_id: str) -> None:
-    for model in (EffectSizeRow, TableOutcome, TableTimepoint, PaperTable):
+    for model in (EffectSizeRow, TableOutcome, TableTimepoint, PaperTable, PaperReview):
         for row in session.exec(select(model).where(model.paper_unique_id == unique_id)).all():
             session.delete(row)
     session.flush()
@@ -604,6 +604,16 @@ def _timepoint_kwargs_from_row(row: dict) -> dict:
     return _kwargs_from_row(row, TableTimepoint, {"id"})
 
 
+def _review_kwargs_from_row(row: dict) -> dict:
+    paper_uid = (row.get("paper_unique_id") or "").strip()
+    reviewer = (row.get("reviewer_email") or "").strip().lower()
+    out: dict = {"paper_unique_id": paper_uid, "reviewer_email": reviewer}
+    completed = _parse_dt(row.get("completed_at"))
+    if completed is not None:
+        out["completed_at"] = completed
+    return out
+
+
 def _strip_held(rows: list[dict], key: str, held: set[str]) -> list[dict]:
     return [r for r in rows if (r.get(key) or "").strip() not in held]
 
@@ -615,6 +625,7 @@ def import_from_sheet_rows(
     table_rows: Optional[list[dict]] = None,
     outcome_rows: Optional[list[dict]] = None,
     timepoint_rows: Optional[list[dict]] = None,
+    review_rows: Optional[list[dict]] = None,
     replace: bool = True,
     preserve_checked_out: bool = True,
 ) -> tuple[int, int, list[str]]:
@@ -629,6 +640,7 @@ def import_from_sheet_rows(
     table_rows = table_rows or []
     outcome_rows = outcome_rows or []
     timepoint_rows = timepoint_rows or []
+    review_rows = review_rows or []
 
     with Session(engine) as session:
         held_ids: set[str] = set()
@@ -641,7 +653,7 @@ def import_from_sheet_rows(
             }
 
         if replace:
-            for model in (EffectSizeRow, TableOutcome, TableTimepoint, PaperTable):
+            for model in (EffectSizeRow, TableOutcome, TableTimepoint, PaperTable, PaperReview):
                 stmt = select(model)
                 if held_ids:
                     stmt = stmt.where(model.paper_unique_id.not_in(held_ids))
@@ -728,6 +740,12 @@ def import_from_sheet_rows(
             session.add(EffectSizeRow(**kwargs))
             n_e += 1
 
+        for row in _strip_held(review_rows, "paper_unique_id", held_ids):
+            r_kwargs = _review_kwargs_from_row(row)
+            if not r_kwargs["paper_unique_id"] or not r_kwargs["reviewer_email"]:
+                continue
+            session.add(PaperReview(**r_kwargs))
+
         session.commit()
     return n_p, n_e, sorted(held_ids)
 
@@ -740,6 +758,7 @@ def import_paper_from_sheet(
     table_rows: Optional[list[dict]] = None,
     outcome_rows: Optional[list[dict]] = None,
     timepoint_rows: Optional[list[dict]] = None,
+    review_rows: Optional[list[dict]] = None,
 ) -> tuple[bool, int]:
     """Refresh one paper from the Sheet. Preserves the checkout state.
 
@@ -748,6 +767,7 @@ def import_paper_from_sheet(
     table_rows = table_rows or []
     outcome_rows = outcome_rows or []
     timepoint_rows = timepoint_rows or []
+    review_rows = review_rows or []
 
     match = next(
         (p for p in paper_rows if (p.get("unique_id") or "").strip() == unique_id),
@@ -763,6 +783,7 @@ def import_paper_from_sheet(
     matching_outcomes = _filter(outcome_rows)
     matching_timepoints = _filter(timepoint_rows)
     matching_effects = _filter(effect_rows)
+    matching_reviews = _filter(review_rows)
 
     with Session(engine) as session:
         existing = session.exec(
@@ -839,6 +860,13 @@ def import_paper_from_sheet(
             es_kwargs["timepoint_id"] = tp_id_map.get(old_timepoint_id) if old_timepoint_id is not None else None
             session.add(EffectSizeRow(**es_kwargs))
             n_e += 1
+
+        for row in matching_reviews:
+            r_kwargs = _review_kwargs_from_row(row)
+            r_kwargs["paper_unique_id"] = unique_id
+            if not r_kwargs["reviewer_email"]:
+                continue
+            session.add(PaperReview(**r_kwargs))
 
         session.commit()
     return True, n_e

@@ -1228,6 +1228,57 @@ def effect_flag_reextract(
 # ---------------------------------------------------------------------------
 
 
+_EDIT_ACTIONS = {"modify", "submit"}
+_ADD_ACTIONS = {
+    "add", "add_table_manual", "add_outcome", "add_timepoint",
+}
+_DELETE_ACTIONS = {
+    "delete", "delete_table", "delete_outcome", "delete_timepoint",
+}
+
+
+def _reviewer_activity(session: Session) -> list[dict]:
+    """Aggregate per-reviewer counts from paper_reviews and audit_log."""
+    from sqlalchemy import func
+
+    completed = dict(
+        session.exec(
+            select(PaperReview.reviewer_email, func.count(PaperReview.id))
+            .group_by(PaperReview.reviewer_email)
+        ).all()
+    )
+
+    action_counts: dict[str, dict[str, int]] = {}
+    last_seen: dict[str, datetime] = {}
+    rows = session.exec(
+        select(AuditLog.email, AuditLog.action, func.count(AuditLog.id), func.max(AuditLog.when))
+        .group_by(AuditLog.email, AuditLog.action)
+    ).all()
+    for email, action, count, when in rows:
+        action_counts.setdefault(email, {})[action] = count
+        if when and (email not in last_seen or when > last_seen[email]):
+            last_seen[email] = when
+
+    emails = set(completed) | set(action_counts)
+    stats = []
+    for email in sorted(emails):
+        per_action = action_counts.get(email, {})
+        edits = sum(per_action.get(a, 0) for a in _EDIT_ACTIONS)
+        adds = sum(per_action.get(a, 0) for a in _ADD_ACTIONS)
+        deletes = sum(per_action.get(a, 0) for a in _DELETE_ACTIONS)
+        stats.append({
+            "email": email,
+            "papers_completed": completed.get(email, 0),
+            "edits": edits,
+            "adds": adds,
+            "deletes": deletes,
+            "total_actions": sum(per_action.values()),
+            "last_activity": last_seen.get(email),
+        })
+    stats.sort(key=lambda s: (-s["papers_completed"], -s["total_actions"], s["email"]))
+    return stats
+
+
 @app.get("/admin", response_class=HTMLResponse)
 def admin_panel(
     request: Request,
@@ -1237,6 +1288,7 @@ def admin_panel(
 ):
     require_admin(request)
     users = list(session.exec(select(User).order_by(User.email)))
+    activity = _reviewer_activity(session)
     return templates.TemplateResponse(
         request,
         "admin.html",
@@ -1246,6 +1298,7 @@ def admin_panel(
             "display_name": request.session.get("display_name"),
             "sheet_id": os.environ.get("GOOGLE_SHEET_ID", ""),
             "users": users,
+            "activity": activity,
         },
     )
 

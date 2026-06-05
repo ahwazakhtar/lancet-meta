@@ -18,6 +18,51 @@
 {% if err %}<p class="msg-error">Error: {{ err }}</p>{% endif %}
 
 <article>
+  <header><strong>Reviewer activity</strong></header>
+  <p class="muted">
+    Papers completed comes from clicking <em>Done</em>. Edits / adds / deletes
+    come from the audit log.
+  </p>
+
+  {% if activity %}
+    <table>
+      <thead>
+        <tr>
+          <th>Reviewer</th>
+          <th>Papers&nbsp;done</th>
+          <th>Edits</th>
+          <th>Adds</th>
+          <th>Deletes</th>
+          <th>Total&nbsp;actions</th>
+          <th>Last activity</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for a in activity %}
+          <tr>
+            <td><strong>{{ a.email }}</strong></td>
+            <td>{{ a.papers_completed }}</td>
+            <td>{{ a.edits }}</td>
+            <td>{{ a.adds }}</td>
+            <td>{{ a.deletes }}</td>
+            <td>{{ a.total_actions }}</td>
+            <td>
+              {% if a.last_activity %}
+                <span class="muted">{{ a.last_activity.strftime('%Y-%m-%d %H:%M') }} UTC</span>
+              {% else %}
+                <span class="muted">—</span>
+              {% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="muted">No reviewer activity recorded yet.</p>
+  {% endif %}
+</article>
+
+<article>
   <header><strong>Reviewers</strong></header>
   <p class="muted">Anyone whose email is on this list can sign in (no password required).</p>
 
